@@ -115,10 +115,24 @@ class PdfAdapter:
                 for snapshot in pages:
                     page = document[snapshot.index]
                     try:
-                        image = page.render(scale=RENDER_SCALE).to_pil().convert("RGB")
-                        output_path = output_dir / f"page-{snapshot.index + 1:04d}.png"
-                        image.save(output_path)
-                        snapshot.render_path = str(output_path)
+                        bitmap = page.render(scale=RENDER_SCALE)
+                        try:
+                            source_image = bitmap.to_pil()
+                            try:
+                                image = source_image.convert('RGB')
+                                try:
+                                    output_path = (
+                                        output_dir / f'page-{snapshot.index + 1:04d}.png'
+                                    )
+                                    image.save(output_path)
+                                    snapshot.render_path = str(output_path)
+                                finally:
+                                    if image is not source_image:
+                                        image.close()
+                            finally:
+                                source_image.close()
+                        finally:
+                            bitmap.close()
                     finally:
                         page.close()
             finally:

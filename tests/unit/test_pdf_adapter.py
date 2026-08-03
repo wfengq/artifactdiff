@@ -8,6 +8,7 @@ import artifactdiff.formats.pdf as pdf_module
 from artifactdiff.errors import InputValidationError, ResourceLimitError, UnsupportedFormatError
 from artifactdiff.formats import adapter_for
 from artifactdiff.formats.pdf import PdfAdapter
+from artifactdiff.models import PageSnapshot
 from tests.factories import make_pdf
 
 
@@ -125,3 +126,114 @@ def test_adapter_registry_selects_pdf_case_insensitively(tmp_path: Path) -> None
 def test_adapter_registry_rejects_unsupported_formats(tmp_path: Path) -> None:
     with pytest.raises(UnsupportedFormatError, match='Supported formats are PDF and DOCX'):
         adapter_for(tmp_path / 'source.txt')
+
+
+class RenderImage:
+    def __init__(self, *, convert_error: RuntimeError | None = None) -> None:
+        self.convert_error = convert_error
+        self.save_error: RuntimeError | None = None
+        self.converted: RenderImage | None = None
+        self.closed = False
+
+    def convert(self, mode: str) -> 'RenderImage':
+        assert mode == 'RGB'
+        if self.convert_error is not None:
+            raise self.convert_error
+        assert self.converted is not None
+        return self.converted
+
+    def save(self, _: Path) -> None:
+        if self.save_error is not None:
+            raise self.save_error
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RenderBitmap:
+    def __init__(self, image: RenderImage) -> None:
+        self.image = image
+        self.closed = False
+
+    def to_pil(self) -> RenderImage:
+        return self.image
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RenderPage:
+    def __init__(self, bitmap: RenderBitmap) -> None:
+        self.bitmap = bitmap
+        self.closed = False
+
+    def render(self, *, scale: float) -> RenderBitmap:
+        assert scale == 2.0
+        return self.bitmap
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RenderDocument:
+    def __init__(self, page: RenderPage) -> None:
+        self.page = page
+        self.closed = False
+
+    def __getitem__(self, index: int) -> RenderPage:
+        assert index == 0
+        return self.page
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def render_snapshot() -> PageSnapshot:
+    return PageSnapshot(index=0, width=612, height=792, text='', normalized_text='')
+
+
+def test_pdf_render_closes_bitmap_and_pil_images_after_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_image = RenderImage()
+    converted_image = RenderImage()
+    source_image.converted = converted_image
+    bitmap = RenderBitmap(source_image)
+    page = RenderPage(bitmap)
+    document = RenderDocument(page)
+    monkeypatch.setattr(pdf_module.pdfium, 'PdfDocument', lambda _: document)
+
+    PdfAdapter._render_pages(tmp_path / 'source.pdf', [render_snapshot()], tmp_path / 'work')
+
+    assert bitmap.closed
+    assert source_image.closed
+    assert converted_image.closed
+    assert page.closed
+    assert document.closed
+
+
+@pytest.mark.parametrize('failure_stage', ['convert', 'save'])
+def test_pdf_render_closes_bitmap_and_images_when_conversion_or_save_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    expected_error = RuntimeError(f'{failure_stage} failed')
+    source_image = RenderImage(convert_error=expected_error if failure_stage == 'convert' else None)
+    converted_image = RenderImage()
+    converted_image.save_error = expected_error if failure_stage == 'save' else None
+    source_image.converted = converted_image
+    bitmap = RenderBitmap(source_image)
+    page = RenderPage(bitmap)
+    document = RenderDocument(page)
+    monkeypatch.setattr(pdf_module.pdfium, 'PdfDocument', lambda _: document)
+
+    with pytest.raises(RuntimeError) as error:
+        PdfAdapter._render_pages(
+            tmp_path / 'source.pdf', [render_snapshot()], tmp_path / 'work'
+        )
+
+    assert error.value is expected_error
+    assert bitmap.closed
+    assert source_image.closed
+    assert converted_image.closed is (failure_stage == 'save')
+    assert page.closed
+    assert document.closed
