@@ -148,3 +148,25 @@ def test_conversion_uses_a_distinct_profile_for_each_call(
 
     assert len(profiles) == 2
     assert profiles[0] != profiles[1]
+
+
+def test_conversion_maps_output_directory_creation_error_to_render_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = tmp_path / "input.docx"
+    source.write_bytes(b"fixture")
+    output_dir = tmp_path / "read-only-render-workdir"
+    original_mkdir = Path.mkdir
+
+    def fail_output_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        if path == output_dir:
+            raise PermissionError("read-only render workdir")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_output_mkdir)
+
+    with pytest.raises(RenderUnavailableError) as error:
+        convert_docx_to_pdf(source, output_dir, tmp_path / "soffice")
+
+    assert str(source) in str(error.value)
+    assert "read-only render workdir" in str(error.value)

@@ -168,6 +168,39 @@ def test_docx_render_reuses_pdf_adapter_pages_and_retains_logical_blocks(
     assert snapshot.warnings == []
 
 
+def test_docx_render_output_directory_error_keeps_semantics_and_adds_one_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_docx(
+        tmp_path / "sample.docx",
+        heading="Q2 Results",
+        paragraphs=["Revenue increased."],
+        rows=[["Region", "Total"]],
+    )
+    workdir = tmp_path / "render-work"
+    blocked_output_dir = workdir / "libreoffice"
+    original_mkdir = Path.mkdir
+
+    def fail_output_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        if path == blocked_output_dir:
+            raise PermissionError("read-only render workdir")
+        original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", fail_output_mkdir)
+    monkeypatch.setattr(docx_module, "find_libreoffice", lambda: tmp_path / "soffice")
+
+    snapshot = DocxAdapter().load(source, render=True, workdir=workdir)
+
+    assert [block.text for block in snapshot.blocks[:2]] == [
+        "Q2 Results",
+        "Revenue increased.",
+    ]
+    assert snapshot.pages == []
+    assert snapshot.page_count is None
+    assert len(snapshot.warnings) == 1
+    assert "read-only render workdir" in snapshot.warnings[0]
+
+
 def test_docx_render_invalid_converted_pdf_keeps_semantics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

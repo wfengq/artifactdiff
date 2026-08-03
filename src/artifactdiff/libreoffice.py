@@ -45,8 +45,8 @@ def find_libreoffice() -> Path | None:
 
 def convert_docx_to_pdf(source: Path, output_dir: Path, executable: Path) -> Path:
     """Convert one DOCX with an isolated profile and return the resulting PDF."""
-    output_dir.mkdir(parents=True, exist_ok=True)
     try:
+        output_dir.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(
             prefix=".libreoffice-profile-", dir=output_dir, ignore_cleanup_errors=True
         ) as profile_name:
