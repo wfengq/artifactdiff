@@ -20,6 +20,31 @@ MAX_PAGES = 500
 RENDER_SCALE = 2.0
 
 
+class _CloseStack:
+    def __init__(self) -> None:
+        self._resources: list[Any] = []
+
+    def __enter__(self) -> '_CloseStack':
+        return self
+
+    def own(self, resource: Any) -> Any:
+        self._resources.append(resource)
+        return resource
+
+    def __exit__(
+        self, _error_type: object, error: BaseException | None, _traceback: object
+    ) -> None:
+        cleanup_error: BaseException | None = None
+        for resource in reversed(self._resources):
+            try:
+                resource.close()
+            except BaseException as close_error:
+                if cleanup_error is None:
+                    cleanup_error = close_error
+        if error is None and cleanup_error is not None:
+            raise cleanup_error
+
+
 class PdfAdapter:
     """Create snapshots from PDF text geometry and optional rendered pages."""
 
@@ -111,31 +136,18 @@ class PdfAdapter:
         output_dir.mkdir(parents=True, exist_ok=True)
         try:
             document = pdfium.PdfDocument(str(path))
-            try:
+            with _CloseStack() as document_resources:
+                document_resources.own(document)
                 for snapshot in pages:
-                    page = document[snapshot.index]
-                    try:
-                        bitmap = page.render(scale=RENDER_SCALE)
-                        try:
-                            source_image = bitmap.to_pil()
-                            try:
-                                image = source_image.convert('RGB')
-                                try:
-                                    output_path = (
-                                        output_dir / f'page-{snapshot.index + 1:04d}.png'
-                                    )
-                                    image.save(output_path)
-                                    snapshot.render_path = str(output_path)
-                                finally:
-                                    if image is not source_image:
-                                        image.close()
-                            finally:
-                                source_image.close()
-                        finally:
-                            bitmap.close()
-                    finally:
-                        page.close()
-            finally:
-                document.close()
+                    with _CloseStack() as page_resources:
+                        page = page_resources.own(document[snapshot.index])
+                        bitmap = page_resources.own(page.render(scale=RENDER_SCALE))
+                        source_image = page_resources.own(bitmap.to_pil())
+                        image = source_image.convert('RGB')
+                        if image is not source_image:
+                            page_resources.own(image)
+                        output_path = output_dir / f'page-{snapshot.index + 1:04d}.png'
+                        image.save(output_path)
+                        snapshot.render_path = str(output_path)
         except pdfium.PdfiumError as error:
             raise InputValidationError(f"invalid PDF: {path}") from error

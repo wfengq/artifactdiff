@@ -132,6 +132,7 @@ class RenderImage:
     def __init__(self, *, convert_error: RuntimeError | None = None) -> None:
         self.convert_error = convert_error
         self.save_error: RuntimeError | None = None
+        self.close_error: RuntimeError | None = None
         self.converted: RenderImage | None = None
         self.closed = False
 
@@ -148,11 +149,14 @@ class RenderImage:
 
     def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class RenderBitmap:
     def __init__(self, image: RenderImage) -> None:
         self.image = image
+        self.close_error: RuntimeError | None = None
         self.closed = False
 
     def to_pil(self) -> RenderImage:
@@ -160,6 +164,8 @@ class RenderBitmap:
 
     def close(self) -> None:
         self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
 
 
 class RenderPage:
@@ -235,5 +241,82 @@ def test_pdf_render_closes_bitmap_and_images_when_conversion_or_save_fails(
     assert bitmap.closed
     assert source_image.closed
     assert converted_image.closed is (failure_stage == 'save')
+    assert page.closed
+    assert document.closed
+
+
+def test_pdf_render_preserves_save_error_when_image_close_also_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_error = RuntimeError('save failed')
+    source_image = RenderImage()
+    converted_image = RenderImage()
+    converted_image.save_error = save_error
+    converted_image.close_error = RuntimeError('image close failed')
+    source_image.converted = converted_image
+    bitmap = RenderBitmap(source_image)
+    page = RenderPage(bitmap)
+    document = RenderDocument(page)
+    monkeypatch.setattr(pdf_module.pdfium, 'PdfDocument', lambda _: document)
+
+    with pytest.raises(RuntimeError) as error:
+        PdfAdapter._render_pages(
+            tmp_path / 'source.pdf', [render_snapshot()], tmp_path / 'work'
+        )
+
+    assert error.value is save_error
+    assert converted_image.closed
+    assert source_image.closed
+    assert bitmap.closed
+    assert page.closed
+    assert document.closed
+
+
+def test_pdf_render_preserves_convert_error_when_source_and_bitmap_close_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    convert_error = RuntimeError('convert failed')
+    source_image = RenderImage(convert_error=convert_error)
+    source_image.close_error = RuntimeError('source close failed')
+    bitmap = RenderBitmap(source_image)
+    bitmap.close_error = RuntimeError('bitmap close failed')
+    page = RenderPage(bitmap)
+    document = RenderDocument(page)
+    monkeypatch.setattr(pdf_module.pdfium, 'PdfDocument', lambda _: document)
+
+    with pytest.raises(RuntimeError) as error:
+        PdfAdapter._render_pages(
+            tmp_path / 'source.pdf', [render_snapshot()], tmp_path / 'work'
+        )
+
+    assert error.value is convert_error
+    assert source_image.closed
+    assert bitmap.closed
+    assert page.closed
+    assert document.closed
+
+
+def test_pdf_render_propagates_cleanup_error_when_rendering_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cleanup_error = RuntimeError('image close failed')
+    source_image = RenderImage()
+    converted_image = RenderImage()
+    converted_image.close_error = cleanup_error
+    source_image.converted = converted_image
+    bitmap = RenderBitmap(source_image)
+    page = RenderPage(bitmap)
+    document = RenderDocument(page)
+    monkeypatch.setattr(pdf_module.pdfium, 'PdfDocument', lambda _: document)
+
+    with pytest.raises(RuntimeError) as error:
+        PdfAdapter._render_pages(
+            tmp_path / 'source.pdf', [render_snapshot()], tmp_path / 'work'
+        )
+
+    assert error.value is cleanup_error
+    assert converted_image.closed
+    assert source_image.closed
+    assert bitmap.closed
     assert page.closed
     assert document.closed
