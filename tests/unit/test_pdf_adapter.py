@@ -128,13 +128,29 @@ def test_adapter_registry_rejects_unsupported_formats(tmp_path: Path) -> None:
         adapter_for(tmp_path / 'source.txt')
 
 
-class RenderImage:
+class CloseTracking:
+    def __init__(self) -> None:
+        self.close_error: RuntimeError | None = None
+        self.close_order: list[str] | None = None
+        self.close_name = ''
+        self.close_calls = 0
+        self.closed = False
+
+    def record_close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+        if self.close_order is not None:
+            self.close_order.append(self.close_name)
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class RenderImage(CloseTracking):
     def __init__(self, *, convert_error: RuntimeError | None = None) -> None:
+        super().__init__()
         self.convert_error = convert_error
         self.save_error: RuntimeError | None = None
-        self.close_error: RuntimeError | None = None
         self.converted: RenderImage | None = None
-        self.closed = False
 
     def convert(self, mode: str) -> 'RenderImage':
         assert mode == 'RGB'
@@ -148,50 +164,45 @@ class RenderImage:
             raise self.save_error
 
     def close(self) -> None:
-        self.closed = True
-        if self.close_error is not None:
-            raise self.close_error
+        self.record_close()
 
 
-class RenderBitmap:
+class RenderBitmap(CloseTracking):
     def __init__(self, image: RenderImage) -> None:
+        super().__init__()
         self.image = image
-        self.close_error: RuntimeError | None = None
-        self.closed = False
 
     def to_pil(self) -> RenderImage:
         return self.image
 
     def close(self) -> None:
-        self.closed = True
-        if self.close_error is not None:
-            raise self.close_error
+        self.record_close()
 
 
-class RenderPage:
+class RenderPage(CloseTracking):
     def __init__(self, bitmap: RenderBitmap) -> None:
+        super().__init__()
         self.bitmap = bitmap
-        self.closed = False
 
     def render(self, *, scale: float) -> RenderBitmap:
         assert scale == 2.0
         return self.bitmap
 
     def close(self) -> None:
-        self.closed = True
+        self.record_close()
 
 
-class RenderDocument:
+class RenderDocument(CloseTracking):
     def __init__(self, page: RenderPage) -> None:
+        super().__init__()
         self.page = page
-        self.closed = False
 
     def __getitem__(self, index: int) -> RenderPage:
         assert index == 0
         return self.page
 
     def close(self) -> None:
-        self.closed = True
+        self.record_close()
 
 
 def render_snapshot() -> PageSnapshot:
@@ -299,14 +310,26 @@ def test_pdf_render_preserves_convert_error_when_source_and_bitmap_close_fail(
 def test_pdf_render_propagates_cleanup_error_when_rendering_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cleanup_error = RuntimeError('image close failed')
+    converted_error = RuntimeError('converted close failed')
     source_image = RenderImage()
     converted_image = RenderImage()
-    converted_image.close_error = cleanup_error
+    converted_image.close_error = converted_error
+    source_image.close_error = RuntimeError('source close failed')
     source_image.converted = converted_image
     bitmap = RenderBitmap(source_image)
     page = RenderPage(bitmap)
     document = RenderDocument(page)
+    close_order: list[str] = []
+    resources = [
+        ('converted', converted_image),
+        ('source', source_image),
+        ('bitmap', bitmap),
+        ('page', page),
+        ('document', document),
+    ]
+    for name, resource in resources:
+        resource.close_name = name
+        resource.close_order = close_order
     monkeypatch.setattr(pdf_module.pdfium, 'PdfDocument', lambda _: document)
 
     with pytest.raises(RuntimeError) as error:
@@ -314,9 +337,6 @@ def test_pdf_render_propagates_cleanup_error_when_rendering_succeeds(
             tmp_path / 'source.pdf', [render_snapshot()], tmp_path / 'work'
         )
 
-    assert error.value is cleanup_error
-    assert converted_image.closed
-    assert source_image.closed
-    assert bitmap.closed
-    assert page.closed
-    assert document.closed
+    assert error.value is converted_error
+    assert close_order == ['converted', 'source', 'bitmap', 'page', 'document']
+    assert [resource.close_calls for _, resource in resources] == [1, 1, 1, 1, 1]
