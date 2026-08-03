@@ -63,12 +63,15 @@ def _block_ref(block: ContentBlock) -> BlockRef:
 def _promote_exact_moves(changes: list[SemanticChange]) -> list[SemanticChange]:
     removed = [change for change in changes if change.kind == "removed"]
     added = [change for change in changes if change.kind == "added"]
-    keys = [
-        _change_key(change)
-        for change in [*removed, *added]
-        if _change_key(change) is not None
-    ]
-    unique_keys = {key for key, count in Counter(keys).items() if count == 2}
+    removed_counts = Counter(
+        key for change in removed if (key := _change_key(change)) is not None
+    )
+    added_counts = Counter(
+        key for change in added if (key := _change_key(change)) is not None
+    )
+    unique_keys = {
+        key for key, count in removed_counts.items() if count == 1 and added_counts[key] == 1
+    }
     added_by_key = {
         key: change
         for change in added

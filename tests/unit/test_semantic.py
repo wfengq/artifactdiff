@@ -57,3 +57,27 @@ def test_semantic_diff_promotes_a_unique_exact_relocation_to_moved() -> None:
     assert [(change.kind, change.before.text, change.after.text) for change in changes] == [
         ("moved", "Second", "Second"),
     ]
+
+
+def test_semantic_diff_keeps_duplicate_removals_as_removed_changes() -> None:
+    changes = diff_snapshots(
+        snapshot("a", [block(0, "Duplicate"), block(1, "Duplicate")]),
+        snapshot("b", []),
+    )
+
+    assert [(change.kind, change.before.text, change.after) for change in changes] == [
+        ("removed", "Duplicate", None),
+        ("removed", "Duplicate", None),
+    ]
+
+
+def test_semantic_diff_keeps_duplicate_additions_as_added_changes() -> None:
+    changes = diff_snapshots(
+        snapshot("a", []),
+        snapshot("b", [block(0, "Duplicate"), block(1, "Duplicate")]),
+    )
+
+    assert [(change.kind, change.before, change.after.text) for change in changes] == [
+        ("added", None, "Duplicate"),
+        ("added", None, "Duplicate"),
+    ]
