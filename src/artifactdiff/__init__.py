@@ -2,6 +2,7 @@
 
 from artifactdiff.contract import (
     ClauseLabel,
+    ClauseSelector,
     ContractClause,
     ContractDocument,
     EntityKind,
@@ -11,7 +12,12 @@ from artifactdiff.contract import (
     ProtectedEntity,
     ProtectedRegion,
     ProtectedRegionKind,
+    SelectorMatch,
+    SelectorResolution,
+    SelectorResolutionStatus,
     detect_language,
+    resolve_baseline,
+    resolve_candidate,
 )
 from artifactdiff.models import (
     BlockRef,
@@ -30,6 +36,7 @@ from artifactdiff.models import (
 __all__ = [
     "BlockRef",
     "ClauseLabel",
+    "ClauseSelector",
     "ComparisonResult",
     "ComparisonSummary",
     "ContentBlock",
@@ -46,8 +53,13 @@ __all__ = [
     "ProtectedRegion",
     "ProtectedRegionKind",
     "Rect",
+    "SelectorMatch",
+    "SelectorResolution",
+    "SelectorResolutionStatus",
     "SemanticChange",
     "SourceDescriptor",
     "VisualPageChange",
     "detect_language",
+    "resolve_baseline",
+    "resolve_candidate",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from difflib import SequenceMatcher
 from pathlib import Path
 from zipfile import BadZipFile
 
@@ -15,6 +16,7 @@ from docx.text.paragraph import Paragraph
 from lxml.etree import XMLSyntaxError
 from pydantic import JsonValue
 
+from artifactdiff.alignment import align_sequences
 from artifactdiff.contract.features import (
     FeatureInspectionError,
     inspect_docx_features,
@@ -26,6 +28,65 @@ from artifactdiff.formats.pdf import PdfAdapter
 from artifactdiff.libreoffice import convert_docx_to_pdf, find_libreoffice
 from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot, PageSnapshot
 from artifactdiff.normalize import fingerprint, normalize_text
+
+RENDERED_EVIDENCE_WARNING = "DOCX rendered evidence alignment was incomplete"
+RENDERED_EVIDENCE_MIN_SIMILARITY = 0.98
+
+
+def _rendered_text_similarity(before: ContentBlock, after: ContentBlock) -> float:
+    if before.normalized_text == after.normalized_text:
+        return 1.0
+    return SequenceMatcher(
+        None, before.normalized_text, after.normalized_text, autojunk=False
+    ).ratio()
+
+
+def _link_rendered_evidence(
+    logical: list[ContentBlock], rendered: list[ContentBlock]
+) -> bool:
+    """Link unique near-exact logical/rendered text pairs and report incompleteness."""
+    pairs = align_sequences(
+        logical,
+        rendered,
+        key=lambda block: block.normalized_text,
+        threshold=RENDERED_EVIDENCE_MIN_SIMILARITY,
+    )
+    eligible = [
+        (before_index, after_index)
+        for before_index, before in enumerate(logical)
+        for after_index, after in enumerate(rendered)
+        if _rendered_text_similarity(before, after) >= RENDERED_EVIDENCE_MIN_SIMILARITY
+    ]
+    logical_counts = {
+        index: sum(before_index == index for before_index, _ in eligible)
+        for index in range(len(logical))
+    }
+    rendered_counts = {
+        index: sum(after_index == index for _, after_index in eligible)
+        for index in range(len(rendered))
+    }
+    logical_indexes = {id(block): index for index, block in enumerate(logical)}
+    rendered_indexes = {id(block): index for index, block in enumerate(rendered)}
+    incomplete = False
+    for pair in pairs:
+        if pair.before is None or pair.after is None:
+            incomplete = True
+            continue
+        before_index = logical_indexes[id(pair.before)]
+        after_index = rendered_indexes[id(pair.after)]
+        if (
+            pair.after.page_index is None
+            or pair.after.bbox is None
+            or _rendered_text_similarity(pair.before, pair.after)
+            < RENDERED_EVIDENCE_MIN_SIMILARITY
+            or logical_counts[before_index] != 1
+            or rendered_counts[after_index] != 1
+        ):
+            incomplete = True
+            continue
+        pair.before.metadata["rendered_page_index"] = pair.after.page_index
+        pair.before.metadata["rendered_bbox"] = pair.after.bbox.model_dump(mode="json")
+    return incomplete
 
 
 def iter_body_items(document: DocumentType) -> Iterator[Paragraph | Table]:
@@ -88,6 +149,8 @@ class DocxAdapter:
                         warnings.append(f"DOCX visual rendering unavailable: {error}")
                     else:
                         pages = rendered.pages
+                        if _link_rendered_evidence(blocks, rendered.blocks):
+                            warnings.append(RENDERED_EVIDENCE_WARNING)
         return DocumentSnapshot.from_path(
             path,
             pages=pages,

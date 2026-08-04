@@ -6,8 +6,47 @@ from docx import Document
 import artifactdiff.formats.docx as docx_module
 from artifactdiff.errors import InputValidationError, RenderUnavailableError
 from artifactdiff.formats.docx import DocxAdapter
-from artifactdiff.models import ContentType
+from artifactdiff.models import (
+    ContentBlock,
+    ContentType,
+    DocumentSnapshot,
+    PageSnapshot,
+    Rect,
+)
+from artifactdiff.normalize import normalize_text
 from tests.factories import make_docx, make_pdf
+
+
+def _rendered_snapshot(*lines: str) -> DocumentSnapshot:
+    blocks = [
+        ContentBlock(
+            id=f"pdf:0:{ordinal}",
+            ordinal=ordinal,
+            page_index=0,
+            content_type=ContentType.PDF_TEXT,
+            text=text,
+            normalized_text=normalize_text(text),
+            bbox=Rect(x0=10, y0=20 + ordinal * 20, x1=200, y1=35 + ordinal * 20),
+        )
+        for ordinal, text in enumerate(lines)
+    ]
+    return DocumentSnapshot(
+        source_path="rendered.pdf",
+        format="pdf",
+        sha256="f" * 64,
+        size_bytes=1,
+        pages=[
+            PageSnapshot(
+                index=0,
+                width=612,
+                height=792,
+                text="\n".join(lines),
+                normalized_text=normalize_text("\n".join(lines)),
+                blocks=blocks,
+            )
+        ],
+        blocks=blocks,
+    )
 
 
 def test_docx_adapter_preserves_heading_paragraph_table_order(tmp_path: Path) -> None:
@@ -211,7 +250,106 @@ def test_docx_render_reuses_pdf_adapter_pages_and_retains_logical_blocks(
         ContentType.PARAGRAPH,
         ContentType.TABLE,
     ]
+    assert snapshot.warnings == [
+        "DOCX rendered evidence alignment was incomplete"
+    ]
+
+
+def test_docx_render_links_unique_normalized_text_to_rendered_geometry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_docx(
+        tmp_path / "contract.docx",
+        heading="第四条　付款条件",
+        paragraphs=["发票开具后 30 天内付款"],
+        rows=[["", ""]],
+    )
+    rendered = _rendered_snapshot("第四条 付款条件", "发票开具后 30 天内付款")
+    monkeypatch.setattr(docx_module, "find_libreoffice", lambda: tmp_path / "soffice")
+    monkeypatch.setattr(
+        docx_module,
+        "convert_docx_to_pdf",
+        lambda source, output_dir, executable: tmp_path / "rendered.pdf",
+    )
+    monkeypatch.setattr(
+        "artifactdiff.formats.docx.PdfAdapter.load", lambda *args, **kwargs: rendered
+    )
+
+    snapshot = DocxAdapter().load(source, render=True, workdir=tmp_path / "work")
+
+    assert snapshot.blocks[0].metadata["rendered_page_index"] == 0
+    assert snapshot.blocks[0].metadata["rendered_bbox"] == {
+        "x0": 10.0,
+        "y0": 20.0,
+        "x1": 200.0,
+        "y1": 35.0,
+    }
+    assert snapshot.blocks[1].metadata["rendered_bbox"] == {
+        "x0": 10.0,
+        "y0": 40.0,
+        "x1": 200.0,
+        "y1": 55.0,
+    }
     assert snapshot.warnings == []
+
+
+def test_docx_render_links_unique_near_exact_text_at_similarity_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logical = "a" * 98 + "bc"
+    rendered = _rendered_snapshot("a" * 98 + "de")
+    source = make_docx(
+        tmp_path / "contract.docx", heading=logical, paragraphs=[], rows=[["", ""]]
+    )
+    monkeypatch.setattr(docx_module, "find_libreoffice", lambda: tmp_path / "soffice")
+    monkeypatch.setattr(
+        docx_module,
+        "convert_docx_to_pdf",
+        lambda source, output_dir, executable: tmp_path / "rendered.pdf",
+    )
+    monkeypatch.setattr(
+        "artifactdiff.formats.docx.PdfAdapter.load", lambda *args, **kwargs: rendered
+    )
+
+    snapshot = DocxAdapter().load(source, render=True, workdir=tmp_path / "work")
+
+    assert snapshot.blocks[0].metadata["rendered_bbox"] == {
+        "x0": 10.0,
+        "y0": 20.0,
+        "x1": 200.0,
+        "y1": 35.0,
+    }
+    assert snapshot.warnings == []
+
+
+def test_docx_render_leaves_duplicate_alignment_unset_and_warns_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = make_docx(
+        tmp_path / "contract.docx",
+        heading="Payment",
+        paragraphs=["Payment"],
+        rows=[["", ""]],
+    )
+    rendered = _rendered_snapshot("Payment", "Payment", "unmatched rendered line")
+    monkeypatch.setattr(docx_module, "find_libreoffice", lambda: tmp_path / "soffice")
+    monkeypatch.setattr(
+        docx_module,
+        "convert_docx_to_pdf",
+        lambda source, output_dir, executable: tmp_path / "rendered.pdf",
+    )
+    monkeypatch.setattr(
+        "artifactdiff.formats.docx.PdfAdapter.load", lambda *args, **kwargs: rendered
+    )
+
+    snapshot = DocxAdapter().load(source, render=True, workdir=tmp_path / "work")
+
+    assert "rendered_bbox" not in snapshot.blocks[0].metadata
+    assert "rendered_bbox" not in snapshot.blocks[1].metadata
+    assert snapshot.warnings == [
+        "DOCX rendered evidence alignment was incomplete"
+    ]
+    assert "Payment" not in snapshot.warnings[0]
 
 
 def test_docx_render_output_directory_error_keeps_semantics_and_adds_one_warning(
