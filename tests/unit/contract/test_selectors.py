@@ -365,6 +365,73 @@ def test_candidate_relocates_short_numeric_anchor_inside_longer_line() -> None:
 
 
 @pytest.mark.parametrize(
+    ("candidate_text", "expected_status"),
+    [
+        ("within 30 days", SelectorResolutionStatus.HIGH_CONFIDENCE),
+        ("within 45 days", SelectorResolutionStatus.HIGH_CONFIDENCE),
+        (
+            "within 30 days\nwithin 30 days",
+            SelectorResolutionStatus.MISSING,
+        ),
+        (
+            "within 45 days\nwithin 46 days",
+            SelectorResolutionStatus.MISSING,
+        ),
+        (
+            "within 30 days\nwithin 45 days",
+            SelectorResolutionStatus.MISSING,
+        ),
+    ],
+)
+def test_candidate_counts_exact_and_edited_numeric_anchor_occurrences_together(
+    candidate_text: str, expected_status: SelectorResolutionStatus
+) -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="within 30 days",
+        occurrences=1,
+    )
+    candidate = _clause(
+        "clause-payment",
+        label="Article II",
+        heading="Payment Terms",
+        text=candidate_text,
+    )
+
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is expected_status
+
+
+@pytest.mark.parametrize(
+    ("candidate_text", "expected_status"),
+    [
+        ("teXrms", SelectorResolutionStatus.HIGH_CONFIDENCE),
+        ("other", SelectorResolutionStatus.MISSING),
+    ],
+)
+def test_candidate_preserves_bounded_fuzzy_matching_for_short_nonnumeric_anchor(
+    candidate_text: str, expected_status: SelectorResolutionStatus
+) -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="terms",
+    )
+    candidate = _clause(
+        "clause-payment",
+        label="Article II",
+        heading="Payment Terms",
+        text=candidate_text,
+    )
+
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is expected_status
+
+
+@pytest.mark.parametrize(
     "candidate_text",
     [
         "45",

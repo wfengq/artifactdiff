@@ -155,7 +155,6 @@ def _fuzzy_anchor_scores(
             lines.append(normalized)
     if (
         not anchor
-        or not _has_sufficient_nonnumeric_context(anchor)
         or len(anchor) > MAX_FUZZY_ANCHOR_CHARACTERS
         or len(lines) > MAX_FUZZY_CLAUSE_LINES
         or sum(len(line) for line in lines) > MAX_FUZZY_CLAUSE_CHARACTERS
@@ -210,7 +209,7 @@ def _has_one_compatible_numeric_edit(
 
 def _stable_anchor_occurrences(
     clause: ContractClause, selector: ClauseSelector
-) -> int:
+) -> int | None:
     anchor = normalize_text(selector.anchor)
     clause_text = normalize_text(clause.text)
     if (
@@ -226,13 +225,17 @@ def _stable_anchor_occurrences(
     matches = list(anchor_pattern.finditer(clause_text))
     if not matches:
         return 0
+    compatible_edits = 0
     for match in matches:
         candidate_tokens = tuple(
             match.group(index) for index in range(1, len(anchor_tokens) + 1)
         )
+        if candidate_tokens == anchor_tokens:
+            continue
         if not _has_one_compatible_numeric_edit(anchor_tokens, candidate_tokens):
-            return 0
-    return len(matches)
+            return None
+        compatible_edits += 1
+    return compatible_edits
 
 
 def _candidate_anchor_fingerprint_score(
@@ -242,11 +245,17 @@ def _candidate_anchor_fingerprint_score(
         clause.fingerprint == selector.baseline_fingerprint
     )
     exact_occurrences = _anchor_occurrences(clause, selector)
-    if exact_occurrences:
-        anchor_score = float(exact_occurrences == selector.occurrences)
-    elif STABLE_VALUE_PATTERN.search(normalize_text(selector.anchor)):
+    if STABLE_VALUE_PATTERN.search(normalize_text(selector.anchor)):
         stable_occurrences = _stable_anchor_occurrences(clause, selector)
-        anchor_score = float(stable_occurrences == selector.occurrences)
+        anchor_score = (
+            0.0
+            if stable_occurrences is None
+            else float(
+                exact_occurrences + stable_occurrences == selector.occurrences
+            )
+        )
+    elif exact_occurrences:
+        anchor_score = float(exact_occurrences == selector.occurrences)
     else:
         fuzzy_scores = _fuzzy_anchor_scores(clause, selector)
         anchor_score = (
