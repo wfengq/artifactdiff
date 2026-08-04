@@ -1,9 +1,53 @@
-import pytest
+from pathlib import Path
 
+import pytest
+from docx import Document
+from pydantic import JsonValue
+
+import artifactdiff.formats.docx as docx_module
 from artifactdiff.contract.analyzer import analyze_contract
-from artifactdiff.contract.models import EvidenceRef, ProtectedRegionKind
-from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot
+from artifactdiff.contract.models import EntityKind, EvidenceRef, ProtectedRegionKind
+from artifactdiff.formats.docx import DocxAdapter
+from artifactdiff.models import (
+    ContentBlock,
+    ContentType,
+    DocumentSnapshot,
+    PageSnapshot,
+    Rect,
+)
 from artifactdiff.normalize import normalize_text
+
+
+def _rendered_snapshot(*lines: str) -> DocumentSnapshot:
+    blocks = [
+        ContentBlock(
+            id=f"pdf:0:{ordinal}",
+            ordinal=ordinal,
+            page_index=0,
+            content_type=ContentType.PDF_TEXT,
+            text=text,
+            normalized_text=normalize_text(text),
+            bbox=Rect(x0=10, y0=20 + ordinal * 20, x1=200, y1=35 + ordinal * 20),
+        )
+        for ordinal, text in enumerate(lines)
+    ]
+    return DocumentSnapshot(
+        source_path="rendered.pdf",
+        format="pdf",
+        sha256="f" * 64,
+        size_bytes=1,
+        pages=[
+            PageSnapshot(
+                index=0,
+                width=612,
+                height=792,
+                text="\n".join(lines),
+                normalized_text=normalize_text("\n".join(lines)),
+                blocks=blocks,
+            )
+        ],
+        blocks=blocks,
+    )
 
 
 @pytest.fixture
@@ -131,3 +175,113 @@ def test_analyzer_disambiguates_duplicate_base_ids_using_full_clause_text() -> N
         for clause in first.clauses
         for entity in clause.entities
     )
+
+
+def test_analyzer_propagates_docx_rendered_geometry_to_all_evidence_consumers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "contract.docx"
+    document = Document()
+    document.add_heading("Section 4 Payment Terms", level=1)
+    document.add_paragraph("Party A: Example Ltd.; pay RMB 10,000.00 within 30 days")
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "RMB 10,000.00"
+    document.add_paragraph("Signature: Alice")
+    document.save(str(source))
+    rendered = _rendered_snapshot(
+        "Section 4 Payment Terms",
+        "Party A: Example Ltd.; pay RMB 10,000.00 within 30 days",
+        "RMB 10,000.00",
+        "Signature: Alice",
+    )
+    monkeypatch.setattr(docx_module, "find_libreoffice", lambda: tmp_path / "soffice")
+    monkeypatch.setattr(
+        docx_module,
+        "convert_docx_to_pdf",
+        lambda source, output_dir, executable: tmp_path / "rendered.pdf",
+    )
+    monkeypatch.setattr(
+        "artifactdiff.formats.docx.PdfAdapter.load", lambda *args, **kwargs: rendered
+    )
+
+    snapshot = DocxAdapter().load(source, render=True, workdir=tmp_path / "work")
+    contract = analyze_contract(snapshot)
+
+    clause_evidence = contract.clauses[0].evidence[0]
+    money = next(entity for entity in contract.entities if entity.kind is EntityKind.MONEY)
+    table_evidence = contract.tables[0]
+    signature = next(
+        region
+        for region in contract.protected_regions
+        if region.kind is ProtectedRegionKind.SIGNATURE
+    )
+    assert (clause_evidence.rendered_page_index, clause_evidence.rendered_bbox) == (
+        0,
+        Rect(x0=10, y0=20, x1=200, y1=35),
+    )
+    assert (money.evidence[0].rendered_page_index, money.evidence[0].rendered_bbox) == (
+        0,
+        Rect(x0=10, y0=40, x1=200, y1=55),
+    )
+    assert (table_evidence.rendered_page_index, table_evidence.rendered_bbox) == (
+        0,
+        Rect(x0=10, y0=60, x1=200, y1=75),
+    )
+    assert (
+        signature.evidence[0].rendered_page_index,
+        signature.evidence[0].rendered_bbox,
+    ) == (0, Rect(x0=10, y0=80, x1=200, y1=95))
+
+
+@pytest.mark.parametrize(
+    "invalid_metadata",
+    [
+        {"rendered_page_index": 0},
+        {
+            "rendered_page_index": 0,
+            "rendered_bbox": {"x0": 1, "y0": 2, "x1": 3},
+        },
+        {
+            "rendered_page_index": "not-a-page",
+            "rendered_bbox": {"x0": 1, "y0": 2, "x1": 3, "y1": 4},
+        },
+    ],
+)
+def test_analyzer_ignores_partial_or_invalid_rendered_geometry(
+    invalid_metadata: dict[str, JsonValue],
+) -> None:
+    valid_bbox: dict[str, JsonValue] = {"x0": 5, "y0": 6, "x1": 7, "y1": 8}
+    blocks = [
+        ContentBlock(
+            id="heading",
+            ordinal=0,
+            content_type=ContentType.HEADING,
+            text="Section 4 Payment",
+            normalized_text="section 4 payment",
+            metadata={"rendered_page_index": 1, "rendered_bbox": valid_bbox},
+        ),
+        ContentBlock(
+            id="body",
+            ordinal=1,
+            content_type=ContentType.PARAGRAPH,
+            text="within 30 days",
+            normalized_text="within 30 days",
+            metadata=invalid_metadata,
+        ),
+    ]
+    snapshot = DocumentSnapshot(
+        source_path="contract.docx",
+        format="docx",
+        sha256="d" * 64,
+        size_bytes=4,
+        blocks=blocks,
+    )
+
+    contract = analyze_contract(snapshot)
+
+    assert contract.clauses[0].evidence[0].rendered_page_index == 1
+    assert contract.clauses[0].evidence[0].rendered_bbox == Rect(
+        x0=5, y0=6, x1=7, y1=8
+    )
+    assert contract.clauses[0].evidence[1].rendered_page_index is None
+    assert contract.clauses[0].evidence[1].rendered_bbox is None

@@ -2,6 +2,9 @@
 
 import hashlib
 from dataclasses import dataclass, field
+from math import isfinite
+
+from pydantic import ValidationError
 
 from artifactdiff.contract.entities import extract_entities
 from artifactdiff.contract.language import detect_language
@@ -35,7 +38,35 @@ class _ClauseDraft:
 
 
 def _evidence(block: ContentBlock) -> EvidenceRef:
-    return EvidenceRef(block_id=block.id, page_index=block.page_index, bbox=block.bbox)
+    rendered_page_index = block.metadata.get("rendered_page_index")
+    rendered_bbox_data = block.metadata.get("rendered_bbox")
+    validated_page_index: int | None = None
+    rendered_bbox: Rect | None = None
+    if (
+        type(rendered_page_index) is int
+        and rendered_page_index >= 0
+        and isinstance(rendered_bbox_data, dict)
+    ):
+        try:
+            candidate = Rect.model_validate(rendered_bbox_data)
+        except ValidationError:
+            pass
+        else:
+            coordinates = (candidate.x0, candidate.y0, candidate.x1, candidate.y1)
+            if (
+                all(isfinite(value) for value in coordinates)
+                and candidate.x0 <= candidate.x1
+                and candidate.y0 <= candidate.y1
+            ):
+                validated_page_index = rendered_page_index
+                rendered_bbox = candidate
+    return EvidenceRef(
+        block_id=block.id,
+        page_index=block.page_index,
+        bbox=block.bbox,
+        rendered_page_index=validated_page_index,
+        rendered_bbox=rendered_bbox,
+    )
 
 
 def _clause_id(draft: _ClauseDraft) -> str:
