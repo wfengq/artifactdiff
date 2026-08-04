@@ -11,6 +11,7 @@ from artifactdiff.policy import (
     AllowRule,
     ContractPolicy,
     EvidenceMode,
+    EvidencePolicy,
     ExactReplace,
     ExpectedRule,
     FrozenPolicy,
@@ -128,6 +129,142 @@ def test_policy_rejects_executable_or_unknown_fields() -> None:
     ],
 )
 def test_policy_models_reject_invalid_or_ambiguous_values(
+    build: Callable[[], object],
+) -> None:
+    with pytest.raises(ValidationError):
+        build()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        pytest.param(
+            lambda: ExactReplace(type=b"exact_replace", before="old", after="new"),
+            id="operation-type",
+        ),
+        pytest.param(
+            lambda: ExactReplace(before=b"old", after="new"),
+            id="operation-before",
+        ),
+        pytest.param(
+            lambda: ExactReplace(before="old", after=b"new"),
+            id="operation-after",
+        ),
+        pytest.param(
+            lambda: ExpectedRule(
+                id=b"payment-window",
+                selector=_selector(),
+                operation=ExactReplace(before="old", after="new"),
+            ),
+            id="expected-id",
+        ),
+        pytest.param(
+            lambda: AllowRule(selector=_selector(), kinds=[b"modified"]),
+            id="allow-kind",
+        ),
+        pytest.param(
+            lambda: VisualPolicy(explained_regions=b"pass"),
+            id="visual-explained",
+        ),
+        pytest.param(
+            lambda: VisualPolicy(pagination_reflow=b"review"),
+            id="visual-pagination",
+        ),
+        pytest.param(
+            lambda: VisualPolicy(protected_region_change=b"fail"),
+            id="visual-protected",
+        ),
+        pytest.param(
+            lambda: VisualPolicy(on_unavailable=b"review"),
+            id="visual-unavailable",
+        ),
+        pytest.param(
+            lambda: EvidencePolicy(mode=b"minimal"),
+            id="evidence-mode",
+        ),
+        pytest.param(
+            lambda: MetadataPolicy(non_business_change=b"review"),
+            id="metadata-mode",
+        ),
+        pytest.param(
+            lambda: PolicyBaseline(sha256=b"a" * 64, format="docx"),
+            id="baseline-sha",
+        ),
+        pytest.param(
+            lambda: PolicyBaseline(sha256="a" * 64, format=b"docx"),
+            id="baseline-format",
+        ),
+        pytest.param(
+            lambda: PolicyPluginRequirement(version=b"1", distribution="plugin"),
+            id="plugin-version",
+        ),
+        pytest.param(
+            lambda: PolicyPluginRequirement(version="1", distribution=b"plugin"),
+            id="plugin-distribution",
+        ),
+        pytest.param(
+            lambda: ContractPolicy(
+                schema_version=b"1.0",
+                baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+            ),
+            id="policy-schema",
+        ),
+        pytest.param(
+            lambda: ContractPolicy(
+                profile=b"contract-safe",
+                baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+            ),
+            id="policy-profile",
+        ),
+        pytest.param(
+            lambda: ContractPolicy(
+                profile_version=b"1.0",
+                baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+            ),
+            id="policy-profile-version",
+        ),
+        pytest.param(
+            lambda: ContractPolicy(
+                baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+                protect=[b"money"],
+            ),
+            id="protected-target",
+        ),
+        pytest.param(
+            lambda: ContractPolicy(
+                baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+                required_plugins={
+                    b"plugin": PolicyPluginRequirement(version="1", distribution="plugin")
+                },
+            ),
+            id="plugin-name",
+        ),
+        pytest.param(
+            lambda: FrozenPolicy(
+                schema_version=b"1.0",
+                policy=ContractPolicy(baseline=PolicyBaseline(sha256="a" * 64, format="docx")),
+                canonical_sha256="b" * 64,
+            ),
+            id="frozen-schema",
+        ),
+        pytest.param(
+            lambda: FrozenPolicy(
+                policy=ContractPolicy(baseline=PolicyBaseline(sha256="a" * 64, format="docx")),
+                canonical_sha256=b"b" * 64,
+            ),
+            id="frozen-sha",
+        ),
+        pytest.param(
+            lambda: FrozenPolicy(
+                policy=ContractPolicy(baseline=PolicyBaseline(sha256="a" * 64, format="docx")),
+                canonical_sha256="b" * 64,
+                assurance=b"local",
+            ),
+            id="frozen-assurance",
+        ),
+    ],
+)
+def test_policy_rejects_bytes_for_every_textual_field(
     build: Callable[[], object],
 ) -> None:
     with pytest.raises(ValidationError):

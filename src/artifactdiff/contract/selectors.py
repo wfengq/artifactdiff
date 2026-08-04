@@ -6,7 +6,7 @@ from enum import StrEnum
 from math import fsum
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, StrictInt, StrictStr, field_validator
 
 from artifactdiff.contract.models import ContractClause, ContractDocument
 from artifactdiff.models import StrictModel
@@ -25,15 +25,37 @@ STABLE_VALUE_PATTERN = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 class ClauseSelector(StrictModel):
-    clause_label: str
-    heading: str
-    ancestor_path: tuple[str, ...] = ()
-    anchor: str
-    baseline_fingerprint: str = ""
-    occurrences: int = Field(default=1, ge=1, le=100)
+    clause_label: StrictStr
+    heading: StrictStr
+    ancestor_path: tuple[StrictStr, ...] = ()
+    anchor: StrictStr
+    baseline_fingerprint: StrictStr = ""
+    occurrences: StrictInt = Field(default=1, ge=1, le=100)
     matcher_version: Literal["1.0"] = "1.0"
     min_similarity: float = Field(default=0.92, ge=0.0, le=1.0)
     min_margin: float = Field(default=0.05, ge=0.0, le=1.0)
+
+    @field_validator("ancestor_path", mode="before")
+    @classmethod
+    def ancestor_path_is_ordered(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            # Pydantic turns ValueError, but not TypeError, into ValidationError.
+            raise ValueError("ancestor path must be ordered")  # noqa: TRY004
+        return value
+
+    @field_validator("matcher_version", mode="before")
+    @classmethod
+    def matcher_version_is_text(cls, value: object) -> object:
+        if not isinstance(value, str):
+            raise ValueError("matcher version must be text")  # noqa: TRY004
+        return value
+
+    @field_validator("min_similarity", "min_margin", mode="before")
+    @classmethod
+    def thresholds_are_numeric(cls, value: object) -> object:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError("selector threshold must be numeric")  # noqa: TRY004
+        return value
 
 
 class SelectorResolutionStatus(StrEnum):
@@ -54,9 +76,7 @@ class SelectorResolution(StrictModel):
     matches: list[SelectorMatch] = Field(default_factory=list)
 
 
-def resolve_baseline(
-    document: ContractDocument, selector: ClauseSelector
-) -> SelectorResolution:
+def resolve_baseline(document: ContractDocument, selector: ClauseSelector) -> SelectorResolution:
     """Resolve an exact selector against a baseline contract."""
     matches = [
         SelectorMatch(clause_id=clause.id, score=1.0)
@@ -73,9 +93,7 @@ def resolve_baseline(
     return SelectorResolution(status=status, matches=matches)
 
 
-def resolve_candidate(
-    document: ContractDocument, selector: ClauseSelector
-) -> SelectorResolution:
+def resolve_candidate(document: ContractDocument, selector: ClauseSelector) -> SelectorResolution:
     """Resolve a conservative weighted selector against a candidate contract."""
     matches = [
         SelectorMatch(clause_id=clause.id, score=_candidate_score(clause, selector))
@@ -110,24 +128,18 @@ def _is_exact_match(clause: ContractClause, selector: ClauseSelector) -> bool:
     return (
         normalize_text(clause.label.normalized) == normalize_text(selector.clause_label)
         and normalize_text(clause.heading) == normalize_text(selector.heading)
-        and _normalized_path(clause.ancestor_path)
-        == _normalized_path(selector.ancestor_path)
+        and _normalized_path(clause.ancestor_path) == _normalized_path(selector.ancestor_path)
         and _anchor_occurrences(clause, selector) == selector.occurrences
         and (
-            not selector.baseline_fingerprint
-            or clause.fingerprint == selector.baseline_fingerprint
+            not selector.baseline_fingerprint or clause.fingerprint == selector.baseline_fingerprint
         )
     )
 
 
-def _mandatory_fields_agree(
-    clause: ContractClause, selector: ClauseSelector
-) -> bool:
-    return (
-        normalize_text(clause.label.normalized) == normalize_text(selector.clause_label)
-        and _normalized_path(clause.ancestor_path)
-        == _normalized_path(selector.ancestor_path)
-    )
+def _mandatory_fields_agree(clause: ContractClause, selector: ClauseSelector) -> bool:
+    return normalize_text(clause.label.normalized) == normalize_text(
+        selector.clause_label
+    ) and _normalized_path(clause.ancestor_path) == _normalized_path(selector.ancestor_path)
 
 
 def _similarity(before: str, after: str) -> float:
@@ -138,15 +150,12 @@ def _similarity(before: str, after: str) -> float:
 
 def _has_sufficient_nonnumeric_context(value: str) -> bool:
     context_characters = sum(
-        character.isalpha()
-        for character in STABLE_VALUE_PATTERN.sub("", normalize_text(value))
+        character.isalpha() for character in STABLE_VALUE_PATTERN.sub("", normalize_text(value))
     )
     return context_characters >= MIN_NONNUMERIC_CONTEXT_CHARACTERS
 
 
-def _fuzzy_anchor_scores(
-    clause: ContractClause, selector: ClauseSelector
-) -> list[float]:
+def _fuzzy_anchor_scores(clause: ContractClause, selector: ClauseSelector) -> list[float]:
     anchor = normalize_text(selector.anchor)
     lines = []
     for line in clause.text.splitlines():
@@ -196,20 +205,15 @@ def _has_one_compatible_numeric_edit(
 ) -> bool:
     changed_tokens = [
         (anchor_token, candidate_token)
-        for anchor_token, candidate_token in zip(
-            anchor_tokens, candidate_tokens, strict=True
-        )
+        for anchor_token, candidate_token in zip(anchor_tokens, candidate_tokens, strict=True)
         if anchor_token != candidate_token
     ]
     return len(changed_tokens) == 1 and (
-        _numeric_token_shape(changed_tokens[0][0])
-        == _numeric_token_shape(changed_tokens[0][1])
+        _numeric_token_shape(changed_tokens[0][0]) == _numeric_token_shape(changed_tokens[0][1])
     )
 
 
-def _stable_anchor_occurrences(
-    clause: ContractClause, selector: ClauseSelector
-) -> int | None:
+def _stable_anchor_occurrences(clause: ContractClause, selector: ClauseSelector) -> int | None:
     anchor = normalize_text(selector.anchor)
     clause_text = normalize_text(clause.text)
     if (
@@ -227,9 +231,7 @@ def _stable_anchor_occurrences(
         return 0
     compatible_edits = 0
     for match in matches:
-        candidate_tokens = tuple(
-            match.group(index) for index in range(1, len(anchor_tokens) + 1)
-        )
+        candidate_tokens = tuple(match.group(index) for index in range(1, len(anchor_tokens) + 1))
         if candidate_tokens == anchor_tokens:
             continue
         if not _has_one_compatible_numeric_edit(anchor_tokens, candidate_tokens):
@@ -238,9 +240,7 @@ def _stable_anchor_occurrences(
     return compatible_edits
 
 
-def _candidate_anchor_fingerprint_score(
-    clause: ContractClause, selector: ClauseSelector
-) -> float:
+def _candidate_anchor_fingerprint_score(clause: ContractClause, selector: ClauseSelector) -> float:
     fingerprint_matches = bool(selector.baseline_fingerprint) and (
         clause.fingerprint == selector.baseline_fingerprint
     )
@@ -250,17 +250,13 @@ def _candidate_anchor_fingerprint_score(
         anchor_score = (
             0.0
             if stable_occurrences is None
-            else float(
-                exact_occurrences + stable_occurrences == selector.occurrences
-            )
+            else float(exact_occurrences + stable_occurrences == selector.occurrences)
         )
     elif exact_occurrences:
         anchor_score = float(exact_occurrences == selector.occurrences)
     else:
         fuzzy_scores = _fuzzy_anchor_scores(clause, selector)
-        anchor_score = (
-            min(fuzzy_scores) if len(fuzzy_scores) == selector.occurrences else 0.0
-        )
+        anchor_score = min(fuzzy_scores) if len(fuzzy_scores) == selector.occurrences else 0.0
     return max(float(fingerprint_matches), anchor_score)
 
 
@@ -268,8 +264,7 @@ def _candidate_score(clause: ContractClause, selector: ClauseSelector) -> float:
     label_score = _similarity(selector.clause_label, clause.label.normalized)
     heading_score = _similarity(selector.heading, clause.heading)
     ancestor_score = float(
-        _normalized_path(clause.ancestor_path)
-        == _normalized_path(selector.ancestor_path)
+        _normalized_path(clause.ancestor_path) == _normalized_path(selector.ancestor_path)
     )
     anchor_or_fingerprint_score = _candidate_anchor_fingerprint_score(clause, selector)
     return fsum(

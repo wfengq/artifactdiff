@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+import textwrap
+
 import pytest
 from pydantic import ValidationError
 
@@ -44,9 +49,7 @@ def _clause(
 
 def _contract(*clauses: ContractClause) -> ContractDocument:
     return ContractDocument(
-        source=SourceDescriptor(
-            path="contract.pdf", sha256="a" * 64, format="pdf", size_bytes=1
-        ),
+        source=SourceDescriptor(path="contract.pdf", sha256="a" * 64, format="pdf", size_bytes=1),
         language=LanguageProfile(kind=LanguageKind.BILINGUAL),
         clauses=list(clauses),
     )
@@ -70,13 +73,115 @@ def test_selector_models_reject_unknown_fields() -> None:
             }
         )
     with pytest.raises(ValidationError):
-        SelectorMatch.model_validate(
-            {"clause_id": "clause-1", "score": 1.0, "unexpected": True}
-        )
+        SelectorMatch.model_validate({"clause_id": "clause-1", "score": 1.0, "unexpected": True})
     with pytest.raises(ValidationError):
-        SelectorResolution.model_validate(
-            {"status": "missing", "matches": [], "unexpected": True}
+        SelectorResolution.model_validate({"status": "missing", "matches": [], "unexpected": True})
+
+
+@pytest.mark.parametrize(
+    ("field", "unsafe_value"),
+    [
+        ("clause_label", b"Section 4"),
+        ("heading", b"Payment"),
+        ("ancestor_path", {"Agreement", "Schedule"}),
+        ("ancestor_path", frozenset({"Agreement", "Schedule"})),
+        ("ancestor_path", [b"Agreement"]),
+        ("anchor", b"within 30 days"),
+        ("baseline_fingerprint", b"fingerprint"),
+        ("occurrences", True),
+        ("occurrences", 1.0),
+        ("occurrences", "1"),
+        ("matcher_version", b"1.0"),
+        ("min_similarity", True),
+        ("min_similarity", "0.92"),
+        ("min_margin", False),
+        ("min_margin", b"0.05"),
+    ],
+)
+def test_selector_rejects_unordered_text_and_unsafe_scalar_coercions(
+    field: str, unsafe_value: object
+) -> None:
+    payload: dict[str, object] = {
+        "clause_label": "Section 4",
+        "heading": "Payment",
+        "ancestor_path": ["Agreement", "Main Terms"],
+        "anchor": "within 30 days",
+        "baseline_fingerprint": "fingerprint",
+        "occurrences": 1,
+        "matcher_version": "1.0",
+        "min_similarity": 0.92,
+        "min_margin": 0.05,
+    }
+    payload[field] = unsafe_value
+
+    with pytest.raises(ValidationError):
+        ClauseSelector.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    "ancestor_path",
+    [("Agreement", "Main Terms"), ["Agreement", "Main Terms"]],
+)
+def test_selector_preserves_valid_ordered_ancestor_paths(
+    ancestor_path: object,
+) -> None:
+    selector = ClauseSelector(
+        clause_label="Section 4",
+        heading="Payment",
+        ancestor_path=ancestor_path,
+        anchor="within 30 days",
+    )
+
+    assert selector.ancestor_path == ("Agreement", "Main Terms")
+
+
+def test_selector_set_input_is_rejected_across_python_hash_seeds() -> None:
+    script = textwrap.dedent(
+        """
+        from pydantic import ValidationError
+        from artifactdiff.contract import ClauseSelector
+        from artifactdiff.policy import (
+            ContractPolicy,
+            ExactReplace,
+            ExpectedRule,
+            PolicyBaseline,
+            policy_digest,
         )
+
+        try:
+            selector = ClauseSelector(
+                clause_label="Section 4",
+                heading="Payment",
+                ancestor_path={"Agreement", "Main Terms", "Schedule", "Annex"},
+                anchor="within 30 days",
+            )
+        except ValidationError:
+            print("rejected")
+        else:
+            policy = ContractPolicy(
+                baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+                expect=[ExpectedRule(
+                    id="payment-window",
+                    selector=selector,
+                    operation=ExactReplace(before="30 days", after="45 days"),
+                )],
+            )
+            print(policy_digest(policy))
+        """
+    )
+    outputs = []
+    for seed in ("1", "2", "3"):
+        environment = {**os.environ, "PYTHONHASHSEED": seed}
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        outputs.append(completed.stdout.strip())
+
+    assert outputs == ["rejected", "rejected", "rejected"]
 
 
 def test_baseline_requires_one_exact_normalized_identity_match() -> None:
@@ -151,9 +256,7 @@ def test_baseline_fails_closed_for_changed_or_duplicated_identity(
 
     assert resolution.status is expected_status
     assert [match.clause_id for match in resolution.matches] == (
-        ["clause-a", "clause-b"]
-        if expected_status is SelectorResolutionStatus.AMBIGUOUS
-        else []
+        ["clause-a", "clause-b"] if expected_status is SelectorResolutionStatus.AMBIGUOUS else []
     )
 
 
@@ -224,16 +327,10 @@ def test_candidate_excludes_label_and_ancestor_mismatches() -> None:
 
 
 def test_candidate_tie_is_ambiguous_and_diagnostics_sort_by_clause_id() -> None:
-    selector = ClauseSelector(
-        clause_label="4.2", heading="Payment", anchor="within 30 days"
-    )
+    selector = ClauseSelector(clause_label="4.2", heading="Payment", anchor="within 30 days")
     document = _contract(
-        _clause(
-            "clause-z", label="4.2", heading="Payment", text="Pay within 30 days"
-        ),
-        _clause(
-            "clause-a", label="4.2", heading="Payment", text="Pay within 30 days"
-        ),
+        _clause("clause-z", label="4.2", heading="Payment", text="Pay within 30 days"),
+        _clause("clause-a", label="4.2", heading="Payment", text="Pay within 30 days"),
     )
 
     resolution = resolve_candidate(document, selector)
@@ -253,12 +350,8 @@ def test_candidate_tie_stays_ambiguous_when_minimum_margin_is_zero() -> None:
         min_margin=0.0,
     )
     document = _contract(
-        _clause(
-            "clause-b", label="4.2", heading="Payment", text="within 30 days"
-        ),
-        _clause(
-            "clause-a", label="4.2", heading="Payment", text="within 30 days"
-        ),
+        _clause("clause-b", label="4.2", heading="Payment", text="within 30 days"),
+        _clause("clause-a", label="4.2", heading="Payment", text="within 30 days"),
     )
 
     resolution = resolve_candidate(document, selector)
@@ -276,9 +369,7 @@ def test_candidate_tie_stays_ambiguous_when_minimum_margin_is_zero() -> None:
 def test_candidate_similarity_threshold_is_inclusive(
     min_similarity: float, expected_status: SelectorResolutionStatus
 ) -> None:
-    candidate = _clause(
-        "clause-1", label="4.2", heading="abcdf", text="within 30 days"
-    )
+    candidate = _clause("clause-1", label="4.2", heading="abcdf", text="within 30 days")
     selector = ClauseSelector(
         clause_label="4.2",
         heading="abcde",
@@ -303,12 +394,8 @@ def test_candidate_runner_up_margin_is_inclusive(
     min_margin: float, expected_status: SelectorResolutionStatus
 ) -> None:
     document = _contract(
-        _clause(
-            "clause-best", label="4.2", heading="abcde", text="within 30 days"
-        ),
-        _clause(
-            "clause-runner", label="4.2", heading="abcdf", text="within 30 days"
-        ),
+        _clause("clause-best", label="4.2", heading="abcde", text="within 30 days"),
+        _clause("clause-runner", label="4.2", heading="abcdf", text="within 30 days"),
     )
     selector = ClauseSelector(
         clause_label="4.2",
@@ -467,9 +554,7 @@ def test_candidate_rejects_changed_numeric_only_anchor(
 
     assert baseline_resolution.status is SelectorResolutionStatus.UNIQUE
     assert candidate_resolution.status is SelectorResolutionStatus.MISSING
-    assert candidate_resolution.matches == [
-        SelectorMatch(clause_id="clause-candidate", score=0.75)
-    ]
+    assert candidate_resolution.matches == [SelectorMatch(clause_id="clause-candidate", score=0.75)]
 
 
 def test_candidate_rejects_changed_numeric_anchor_with_only_punctuation_context() -> None:
@@ -492,10 +577,7 @@ def test_candidate_rejects_changed_numeric_anchor_with_only_punctuation_context(
         text="--- 45 !!!",
     )
 
-    assert (
-        resolve_baseline(_contract(baseline), selector).status
-        is SelectorResolutionStatus.UNIQUE
-    )
+    assert resolve_baseline(_contract(baseline), selector).status is SelectorResolutionStatus.UNIQUE
     resolution = resolve_candidate(_contract(candidate), selector)
 
     assert resolution.status is SelectorResolutionStatus.MISSING
@@ -561,9 +643,7 @@ def test_candidate_rejects_duplicate_fuzzy_anchor_occurrences() -> None:
         label="Article II",
         heading="Payment Terms",
         text=(
-            "Article II Payment Terms\n"
-            "Payment is due within 45 days\n"
-            "Payment is due within 46 days"
+            "Article II Payment Terms\nPayment is due within 45 days\nPayment is due within 46 days"
         ),
     )
 

@@ -14,8 +14,10 @@ from artifactdiff.policy import (
     load_policy,
     write_policy,
 )
+from artifactdiff.policy.io import _load_json, _load_yaml, _UnsafePolicyInput
 
 MAX_POLICY_BYTES = 1_048_576
+MAX_POLICY_NESTING = 64
 
 
 def _policy() -> ContractPolicy:
@@ -211,6 +213,179 @@ def test_load_policy_rejects_oversized_files_before_parsing(tmp_path: Path) -> N
 
     with pytest.raises(PolicyValidationError):
         load_policy(path)
+
+
+def _nested_sequence(depth: int) -> str:
+    return "[" * depth + '"TOP_SECRET"' + "]" * depth
+
+
+@pytest.mark.parametrize("loader", [_load_json, _load_yaml])
+def test_policy_parsers_accept_the_documented_nesting_boundary(loader: object) -> None:
+    payload = _nested_sequence(MAX_POLICY_NESTING)
+
+    loaded = loader(payload)
+
+    for _ in range(MAX_POLICY_NESTING):
+        assert isinstance(loaded, list)
+        loaded = loaded[0]
+    assert loaded == "TOP_SECRET"
+
+
+@pytest.mark.parametrize("loader", [_load_json, _load_yaml])
+def test_policy_parsers_reject_nesting_above_the_documented_boundary(
+    loader: object,
+) -> None:
+    payload = _nested_sequence(MAX_POLICY_NESTING + 1)
+
+    with pytest.raises(_UnsafePolicyInput):
+        loader(payload)
+
+
+@pytest.mark.parametrize("suffix", [".json", ".yaml"])
+def test_load_policy_translates_actual_recursion_inputs_without_disclosure(
+    tmp_path: Path, suffix: str
+) -> None:
+    path = tmp_path / f"deep{suffix}"
+    path.write_text(_nested_sequence(2_000), encoding="utf-8")
+
+    with pytest.raises(PolicyValidationError) as error:
+        load_policy(path)
+
+    assert str(error.value) == "invalid policy file"
+    assert "TOP_SECRET" not in str(error.value)
+
+
+@pytest.mark.parametrize("suffix", [".json", ".yaml"])
+def test_nesting_delimiters_inside_strings_do_not_consume_depth(
+    tmp_path: Path, suffix: str
+) -> None:
+    path = tmp_path / f"policy{suffix}"
+    nested_text = "[" * (MAX_POLICY_NESTING + 1)
+    if suffix == ".json":
+        contents = json.dumps(
+            {
+                "baseline": {"sha256": "a" * 64, "format": "docx"},
+                "required_plugins": {"plugin": {"version": nested_text, "distribution": "plugin"}},
+            }
+        )
+    else:
+        contents = (
+            "baseline: {sha256: "
+            + "a" * 64
+            + ", format: docx}\nrequired_plugins:\n"
+            + "  plugin:\n"
+            + f"    version: '{nested_text}'\n"
+            + "    distribution: plugin\n"
+        )
+    path.write_text(contents, encoding="utf-8")
+
+    assert load_policy(path).required_plugins["plugin"].version == nested_text
+
+
+@pytest.mark.parametrize(
+    ("field", "scalar", "expected"),
+    [
+        ("allow_network", "true", True),
+        ("allow_network", "false", False),
+        ("allow_model", "true", True),
+        ("allow_model", "false", False),
+    ],
+)
+def test_yaml_security_booleans_accept_canonical_lowercase_true_false(
+    tmp_path: Path, field: str, scalar: str, expected: bool
+) -> None:
+    path = tmp_path / "policy.yaml"
+    path.write_text(
+        "baseline: {sha256: "
+        + "a" * 64
+        + ", format: docx}\nrequired_plugins:\n"
+        + "  plugin:\n"
+        + "    version: '1'\n"
+        + "    distribution: plugin\n"
+        + f"    {field}: {scalar}\n",
+        encoding="utf-8",
+    )
+
+    policy = load_policy(path)
+
+    assert getattr(policy.required_plugins["plugin"], field) is expected
+
+
+@pytest.mark.parametrize("field", ["allow_network", "allow_model"])
+@pytest.mark.parametrize(
+    "scalar",
+    [
+        "yes",
+        "Yes",
+        "YES",
+        "no",
+        "No",
+        "NO",
+        "on",
+        "On",
+        "ON",
+        "off",
+        "Off",
+        "OFF",
+        "True",
+        "TRUE",
+        "False",
+        "FALSE",
+    ],
+)
+def test_yaml_security_booleans_reject_noncanonical_implicit_forms(
+    tmp_path: Path, field: str, scalar: str
+) -> None:
+    path = tmp_path / "policy.yaml"
+    path.write_text(
+        "baseline: {sha256: "
+        + "a" * 64
+        + ", format: docx}\nrequired_plugins:\n"
+        + "  plugin:\n"
+        + "    version: '1'\n"
+        + "    distribution: plugin\n"
+        + f"    {field}: {scalar}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PolicyValidationError):
+        load_policy(path)
+
+
+@pytest.mark.parametrize(
+    "scalar",
+    [
+        "yes",
+        "Yes",
+        "YES",
+        "no",
+        "No",
+        "NO",
+        "on",
+        "On",
+        "ON",
+        "off",
+        "Off",
+        "OFF",
+    ],
+)
+def test_yaml_legacy_boolean_words_remain_text_outside_boolean_fields(
+    tmp_path: Path, scalar: str
+) -> None:
+    path = tmp_path / "policy.yaml"
+    path.write_text(
+        "baseline: {sha256: "
+        + "a" * 64
+        + ", format: docx}\nrequired_plugins:\n"
+        + "  plugin:\n"
+        + f"    version: {scalar}\n"
+        + "    distribution: plugin\n",
+        encoding="utf-8",
+    )
+
+    policy = load_policy(path)
+
+    assert policy.required_plugins["plugin"].version == scalar
 
 
 @pytest.mark.parametrize("operation", ["load", "write"])

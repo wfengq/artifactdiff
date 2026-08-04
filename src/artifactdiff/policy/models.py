@@ -3,29 +3,34 @@
 from enum import StrEnum
 from typing import Annotated, Literal
 
-from pydantic import Field, StrictBool, StrictInt, field_validator, model_validator
+from pydantic import (
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from artifactdiff.contract import ClauseSelector
 from artifactdiff.models import StrictModel
 
-PluginName = Annotated[str, Field(min_length=1, max_length=128)]
+PluginName = Annotated[StrictStr, Field(min_length=1, max_length=128)]
 AllowKind = Literal["added", "removed", "modified", "moved"]
 
 
-def _reject_ambiguous_selector_scalars(value: object) -> object:
-    if isinstance(value, dict):
-        occurrences = value.get("occurrences", 1)
-        if isinstance(occurrences, bool) or not isinstance(occurrences, int):
-            # Pydantic turns ValueError, but not TypeError, into ValidationError.
-            raise ValueError(  # noqa: TRY004
-                "selector occurrences must be an integer"
-            )
-        for field in ("min_similarity", "min_margin"):
-            numeric = value.get(field, 0.0)
-            if isinstance(numeric, bool) or not isinstance(numeric, (int, float)):
-                raise ValueError(  # noqa: TRY004
-                    f"selector {field} must be numeric"
-                )
+def _require_text(value: object) -> object:
+    if not isinstance(value, str):
+        # Pydantic turns ValueError, but not TypeError, into ValidationError.
+        raise ValueError("value must be text")  # noqa: TRY004
+    return value
+
+
+def _require_text_collection(value: object) -> object:
+    if not isinstance(value, (list, tuple, set, frozenset)) or any(
+        not isinstance(item, str) for item in value
+    ):
+        raise ValueError("collection values must be text")
     return value
 
 
@@ -37,30 +42,24 @@ class EvidenceMode(StrEnum):
 
 class ExactReplace(StrictModel):
     type: Literal["exact_replace"] = "exact_replace"
-    before: str = Field(min_length=1, max_length=10_000)
-    after: str = Field(min_length=1, max_length=10_000)
+    before: StrictStr = Field(min_length=1, max_length=10_000)
+    after: StrictStr = Field(min_length=1, max_length=10_000)
     occurrences: StrictInt = Field(default=1, ge=1, le=100)
+
+    _type_is_text = field_validator("type", mode="before")(_require_text)
 
 
 class ExpectedRule(StrictModel):
-    id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
+    id: StrictStr = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
     selector: ClauseSelector
     operation: ExactReplace
-
-    @field_validator("selector", mode="before")
-    @classmethod
-    def selector_scalars_are_unambiguous(cls, value: object) -> object:
-        return _reject_ambiguous_selector_scalars(value)
 
 
 class AllowRule(StrictModel):
     selector: ClauseSelector
     kinds: frozenset[AllowKind] = Field(min_length=1)
 
-    @field_validator("selector", mode="before")
-    @classmethod
-    def selector_scalars_are_unambiguous(cls, value: object) -> object:
-        return _reject_ambiguous_selector_scalars(value)
+    _kinds_are_text = field_validator("kinds", mode="before")(_require_text_collection)
 
 
 class ProtectedTarget(StrEnum):
@@ -84,6 +83,14 @@ class VisualPolicy(StrictModel):
     on_unavailable: Literal["review", "fail"] = "review"
     layout_envelope_padding_points: float = Field(default=6.0, ge=0.0, le=72.0)
 
+    _outcomes_are_text = field_validator(
+        "explained_regions",
+        "pagination_reflow",
+        "protected_region_change",
+        "on_unavailable",
+        mode="before",
+    )(_require_text)
+
     @field_validator("layout_envelope_padding_points", mode="before")
     @classmethod
     def reject_ambiguous_padding(cls, value: object) -> object:
@@ -96,19 +103,25 @@ class VisualPolicy(StrictModel):
 class EvidencePolicy(StrictModel):
     mode: EvidenceMode = EvidenceMode.MINIMAL
 
+    _mode_is_text = field_validator("mode", mode="before")(_require_text)
+
 
 class MetadataPolicy(StrictModel):
     non_business_change: Literal["review", "ignore"] = "review"
 
+    _outcome_is_text = field_validator("non_business_change", mode="before")(_require_text)
+
 
 class PolicyBaseline(StrictModel):
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     format: Literal["pdf", "docx"]
+
+    _format_is_text = field_validator("format", mode="before")(_require_text)
 
 
 class PolicyPluginRequirement(StrictModel):
-    version: str = Field(min_length=1, max_length=128)
-    distribution: str = Field(min_length=1, max_length=128)
+    version: StrictStr = Field(min_length=1, max_length=128)
+    distribution: StrictStr = Field(min_length=1, max_length=128)
     allow_network: StrictBool = False
     allow_model: StrictBool = False
 
@@ -128,6 +141,20 @@ class ContractPolicy(StrictModel):
         default_factory=dict, max_length=100
     )
 
+    _versions_are_text = field_validator(
+        "schema_version", "profile", "profile_version", mode="before"
+    )(_require_text)
+    _protected_targets_are_text = field_validator("protect", mode="before")(
+        _require_text_collection
+    )
+
+    @field_validator("expect", "allow", mode="before")
+    @classmethod
+    def rule_collections_are_ordered(cls, value: object) -> object:
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("rule collections must be ordered")  # noqa: TRY004
+        return value
+
     @model_validator(mode="after")
     def expected_rule_ids_are_unique(self) -> "ContractPolicy":
         identifiers = [rule.id for rule in self.expect]
@@ -139,5 +166,7 @@ class ContractPolicy(StrictModel):
 class FrozenPolicy(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     policy: ContractPolicy
-    canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     assurance: Literal["local"] = "local"
+
+    _labels_are_text = field_validator("schema_version", "assurance", mode="before")(_require_text)
