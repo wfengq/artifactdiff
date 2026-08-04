@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 
@@ -15,6 +16,7 @@ from artifactdiff.contract.selectors import (
 from artifactdiff.errors import InputValidationError
 from tests.factories import (
     ContractLanguage,
+    _margin_image,
     make_contract_docx,
     make_contract_pdf,
 )
@@ -69,6 +71,30 @@ def test_contract_factories_are_byte_stable(
     second = factory(tmp_path / f"second.{format_name}", language=language)
 
     assert second.read_bytes() == first.read_bytes()
+
+
+def test_pdf_factory_uses_self_contained_cjk_font_without_host_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from reportlab.pdfbase import pdfmetrics
+
+    monkeypatch.delitem(pdfmetrics._fonts, "ArtifactDiffContractCJK", raising=False)
+    with monkeypatch.context() as context:
+        context.setattr(Path, "is_file", lambda _: False)
+        first = make_contract_pdf(tmp_path / "first.pdf", language="zh")
+        second = make_contract_pdf(tmp_path / "second.pdf", language="zh")
+
+    assert second.read_bytes() == first.read_bytes()
+    first_ir = inspect_contract(first)
+    assert inspect_contract(first) == first_ir
+    assert cast(dict[str, Any], first_ir["language"])["kind"] == "zh"
+
+
+def test_margin_images_preserve_distinct_chinese_glyph_content() -> None:
+    confidential = _margin_image("机密合同").getvalue()
+    attachment = _margin_image("价格附件").getvalue()
+
+    assert sha256(confidential).digest() != sha256(attachment).digest()
 
 
 @pytest.mark.parametrize("language", ["zh", "en", "zh-en"])

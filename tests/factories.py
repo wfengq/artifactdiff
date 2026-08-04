@@ -6,7 +6,7 @@ from typing import Literal
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from docx import Document
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from artifactdiff.models import (
     BlockRef,
@@ -25,6 +25,9 @@ ORDERED_PDF = "JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgK
 
 ContractLanguage = Literal["zh", "en", "zh-en"]
 _FIXED_ZIP_TIMESTAMP = (2026, 8, 4, 0, 0, 0)
+_FIXTURE_FONT_PATH = (
+    Path(__file__).parent / "assets" / "fonts" / "ArtifactDiffContractCJK-Regular.ttf"
+)
 
 
 def contract_lines(language: ContractLanguage, payment_days: int = 30) -> list[str]:
@@ -104,13 +107,11 @@ def make_contract_pdf(
     from reportlab.pdfbase.ttfonts import TTFont
     from reportlab.pdfgen import canvas
 
-    font_name = "Helvetica"
-    if language != "en":
-        font_name = "ArtifactDiffContractCJK"
-        try:
-            pdfmetrics.getFont(font_name)
-        except KeyError:
-            pdfmetrics.registerFont(TTFont(font_name, str(_cjk_font_path())))
+    font_name = "ArtifactDiffContractCJK"
+    try:
+        pdfmetrics.getFont(font_name)
+    except KeyError:
+        pdfmetrics.registerFont(TTFont(font_name, str(_FIXTURE_FONT_PATH)))
     document = canvas.Canvas(str(path), pagesize=letter, invariant=1, pageCompression=1)
     document.setAuthor("Private Contract Author")
     document.setCreator("ArtifactDiff deterministic fixtures")
@@ -151,25 +152,12 @@ def _stable_zip(package: bytes) -> bytes:
 
 def _margin_image(text: str) -> BytesIO:
     image = Image.new("RGB", (1008, 48), "white")
-    ImageDraw.Draw(image).text((8, 12), text, fill="black")
+    font = ImageFont.truetype(str(_FIXTURE_FONT_PATH), size=24)
+    ImageDraw.Draw(image).text((8, 6), text, fill="black", font=font)
     output = BytesIO()
     image.save(output, format="PNG", optimize=False)
     output.seek(0)
     return output
-
-
-def _cjk_font_path() -> Path:
-    candidates = (
-        Path("C:/Windows/Fonts/ARIALUNI.TTF"),
-        Path("C:/Windows/Fonts/simhei.ttf"),
-        Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-        Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
-        Path("/System/Library/Fonts/PingFang.ttc"),
-    )
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise RuntimeError("A CJK TrueType font is required for contract PDF fixtures")
 
 
 def make_pdf(path: Path, pages: list[list[tuple[float, float, str]]]) -> Path:
