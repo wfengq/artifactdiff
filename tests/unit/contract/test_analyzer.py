@@ -178,6 +178,42 @@ def test_analyzer_disambiguates_duplicate_base_ids_using_full_clause_text() -> N
     )
 
 
+def test_analyzer_keeps_every_repeated_entity_occurrence_unique_and_stable() -> None:
+    blocks = [
+        ContentBlock(
+            id="heading",
+            ordinal=0,
+            content_type=ContentType.HEADING,
+            text="Section 1 Repeated values",
+            normalized_text="section 1 repeated values",
+        ),
+        ContentBlock(
+            id="body",
+            ordinal=1,
+            content_type=ContentType.PARAGRAPH,
+            text="Party A: Acme Ltd; Party A: Acme Ltd; RMB 100 and RMB 100",
+            normalized_text="party a: acme ltd; party a: acme ltd; rmb 100 and rmb 100",
+        ),
+    ]
+    snapshot = DocumentSnapshot(
+        source_path="contract.docx",
+        format="docx",
+        sha256="e" * 64,
+        size_bytes=5,
+        blocks=blocks,
+    )
+
+    first = analyze_contract(snapshot)
+    second = analyze_contract(snapshot)
+
+    assert len(first.entities) == 6
+    assert len({item.id for item in first.entities}) == len(first.entities)
+    assert [item.id for item in first.clauses[0].entities] == [
+        item.id for item in first.entities
+    ]
+    assert second.model_dump(mode="json") == first.model_dump(mode="json")
+
+
 def test_analyzer_propagates_docx_rendered_geometry_to_all_evidence_consumers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

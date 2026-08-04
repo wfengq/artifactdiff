@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from collections import Counter
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
@@ -56,8 +57,19 @@ DURATION_UNITS = {
 }
 
 
-def _entity_id(kind: EntityKind, value: str, clause_id: str | None, block_id: str) -> str:
-    material = f"{kind.value}\0{value}\0{clause_id or ''}\0{block_id}".encode("utf-8")
+def _entity_id(
+    kind: EntityKind,
+    value: str,
+    clause_id: str | None,
+    block_id: str,
+    duplicate_location: tuple[int, int] | None = None,
+) -> str:
+    if duplicate_location is None:
+        identity = block_id
+    else:
+        block_index, occurrence_index = duplicate_location
+        identity = f"duplicate\0{block_index}\0{occurrence_index}"
+    material = f"{kind.value}\0{value}\0{clause_id or ''}\0{identity}".encode("utf-8")
     return f"entity-{hashlib.sha256(material).hexdigest()[:24]}"
 
 
@@ -82,7 +94,11 @@ def _currency_value(value: str) -> str:
 
 
 def extract_entities(
-    text: str, clause_id: str | None, evidence: EvidenceRef
+    text: str,
+    clause_id: str | None,
+    evidence: EvidenceRef,
+    *,
+    block_index: int = 0,
 ) -> list[ProtectedEntity]:
     """Extract only explicitly bounded protected values from one source block."""
     matches: list[tuple[int, EntityKind, str, str]] = []
@@ -120,14 +136,29 @@ def extract_entities(
             matches.append((match.start(), EntityKind.PERCENTAGE, match.group(), value))
 
     matches.sort(key=lambda item: (item[0], item[1].value))
-    return [
-        ProtectedEntity(
-            id=_entity_id(kind, value, clause_id, evidence.block_id),
-            kind=kind,
-            text=matched_text,
-            normalized_value=value,
-            clause_id=clause_id,
-            evidence=[evidence],
+    group_counts = Counter((kind, value) for _, kind, _, value in matches)
+    occurrences: Counter[tuple[EntityKind, str]] = Counter()
+    entities: list[ProtectedEntity] = []
+    for _, kind, matched_text, value in matches:
+        key = (kind, value)
+        duplicate_location = None
+        if group_counts[key] > 1:
+            duplicate_location = (block_index, occurrences[key])
+            occurrences[key] += 1
+        entities.append(
+            ProtectedEntity(
+                id=_entity_id(
+                    kind,
+                    value,
+                    clause_id,
+                    evidence.block_id,
+                    duplicate_location,
+                ),
+                kind=kind,
+                text=matched_text,
+                normalized_value=value,
+                clause_id=clause_id,
+                evidence=[evidence],
+            )
         )
-        for _, kind, matched_text, value in matches
-    ]
+    return entities

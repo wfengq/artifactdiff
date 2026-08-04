@@ -255,8 +255,13 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
         text = "\n".join(block.text for block in draft.blocks)
         clause_entities = [
             entity
-            for block in draft.blocks
-            for entity in extract_entities(block.text, ids[index], _evidence(block))
+            for block_index, block in enumerate(draft.blocks)
+            for entity in extract_entities(
+                block.text,
+                ids[index],
+                _evidence(block),
+                block_index=block_index,
+            )
         ]
         all_entities.extend(clause_entities)
         children = [ids[child] for child, item in enumerate(drafts) if item.parent_index == index]

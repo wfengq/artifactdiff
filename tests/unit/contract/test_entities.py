@@ -51,3 +51,49 @@ def test_extract_entities_requires_bounded_currency_codes_for_money(
     entities = extract_entities("XRMB 100 and 100 CNYx", None, evidence)
 
     assert entities == []
+
+
+def test_extract_entities_gives_repeated_money_and_currency_unique_stable_ids(
+    evidence: EvidenceRef,
+) -> None:
+    first = extract_entities("RMB 100 and RMB 100", "clause-1", evidence)
+    second = extract_entities("RMB 100 and RMB 100", "clause-1", evidence)
+
+    assert [(item.kind, item.normalized_value) for item in first] == [
+        ("currency", "CNY"),
+        ("money", "100"),
+        ("currency", "CNY"),
+        ("money", "100"),
+    ]
+    assert len({item.id for item in first}) == 4
+    assert [item.id for item in second] == [item.id for item in first]
+
+
+def test_extract_entities_gives_repeated_parties_unique_ids(
+    evidence: EvidenceRef,
+) -> None:
+    entities = extract_entities(
+        "Party A: Acme Ltd; Party A: Acme Ltd", "clause-1", evidence
+    )
+
+    assert [item.normalized_value for item in entities] == ["Acme Ltd", "Acme Ltd"]
+    assert len({item.id for item in entities}) == 2
+
+
+def test_unrelated_entity_insertion_does_not_renumber_repeated_values(
+    evidence: EvidenceRef,
+) -> None:
+    baseline = extract_entities("RMB 100 and RMB 100", "clause-1", evidence)
+    inserted = extract_entities("45 days; RMB 100 and RMB 100", "clause-1", evidence)
+
+    baseline_ids = [
+        item.id
+        for item in baseline
+        if (item.kind.value, item.normalized_value) in {("currency", "CNY"), ("money", "100")}
+    ]
+    inserted_ids = [
+        item.id
+        for item in inserted
+        if (item.kind.value, item.normalized_value) in {("currency", "CNY"), ("money", "100")}
+    ]
+    assert inserted_ids == baseline_ids
