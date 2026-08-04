@@ -87,6 +87,17 @@ def test_unchanged_report_shows_source_schema_status_and_empty_states(tmp_path: 
     assert document.find("img") is None
 
 
+def test_partial_report_without_warning_details_shows_generic_warning(tmp_path: Path) -> None:
+    result = _unchanged_result().model_copy(update={"status": "partial"})
+
+    report = write_html(result, {}, tmp_path / "report.html")
+    _, document = _document(report)
+    warning = document.select_one('[role="alert"]')
+
+    assert warning is not None
+    assert "some results may be unavailable" in warning.get_text(" ", strip=True).casefold()
+
+
 def test_html_report_bytes_are_stable(tmp_path: Path) -> None:
     result, assets = sample_changed_result_with_images(tmp_path)
     first = write_html(result, assets, tmp_path / "first" / "report.html")

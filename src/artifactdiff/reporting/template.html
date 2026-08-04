@@ -64,8 +64,8 @@
       <div class="metric"><strong>{{ "%.2f"|format(result.summary.visual_change_ratio * 100) }}%</strong>Visual change</div>
     </div>
     <p class="meta">Schema {{ result.schema_version }} · Engine {{ result.engine_version }} · {{ result.duration_ms }} ms</p>
-    {% if result.warnings %}
-    <section class="warning" role="alert" aria-label="Warnings"><h2>Warnings</h2><ul>{% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}</ul></section>
+    {% if result.status == "partial" or result.warnings %}
+    <section class="warning" role="alert" aria-label="Warnings"><h2>Warnings</h2>{% if result.warnings %}<ul>{% for warning in result.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>{% else %}<p>This comparison is partial; some results may be unavailable.</p>{% endif %}</section>
     {% endif %}
   </header>
   <aside aria-label="Changed pages and document structure">

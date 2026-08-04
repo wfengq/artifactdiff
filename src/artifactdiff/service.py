@@ -53,7 +53,7 @@ def compare_documents(
     *,
     options: CompareOptions,
 ) -> ComparisonRun:
-    """Compare two supported documents and write the JSON report."""
+    """Compare two supported documents and write JSON and HTML reports."""
     before = validate_source(before, force=options.force)
     after = validate_source(after, force=options.force)
     if before.suffix.casefold() != after.suffix.casefold():
