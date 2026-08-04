@@ -62,15 +62,46 @@ def _entity_id(
     value: str,
     clause_id: str | None,
     block_id: str,
-    duplicate_location: tuple[int, int] | None = None,
 ) -> str:
-    if duplicate_location is None:
-        identity = block_id
-    else:
-        block_index, occurrence_index = duplicate_location
-        identity = f"duplicate\0{block_index}\0{occurrence_index}"
-    material = f"{kind.value}\0{value}\0{clause_id or ''}\0{identity}".encode("utf-8")
+    material = f"{kind.value}\0{value}\0{clause_id or ''}\0{block_id}".encode("utf-8")
     return f"entity-{hashlib.sha256(material).hexdigest()[:24]}"
+
+
+def _duplicate_entity_id(
+    kind: EntityKind,
+    value: str,
+    clause_id: str | None,
+    occurrence_index: int,
+) -> str:
+    material = f"{kind.value}\0{value}\0{clause_id or ''}\0duplicate\0{occurrence_index}".encode()
+    return f"entity-{hashlib.sha256(material).hexdigest()[:24]}"
+
+
+def assign_clause_entity_ids(entities: list[ProtectedEntity]) -> list[ProtectedEntity]:
+    """Assign segmentation-independent IDs to repeated clause entity groups."""
+    group_counts = Counter((item.kind, item.normalized_value) for item in entities)
+    occurrences: Counter[tuple[EntityKind, str]] = Counter()
+    assigned: list[ProtectedEntity] = []
+    for entity in entities:
+        key = (entity.kind, entity.normalized_value)
+        if group_counts[key] == 1:
+            assigned.append(entity)
+            continue
+        occurrence_index = occurrences[key]
+        occurrences[key] += 1
+        assigned.append(
+            entity.model_copy(
+                update={
+                    "id": _duplicate_entity_id(
+                        entity.kind,
+                        entity.normalized_value,
+                        entity.clause_id,
+                        occurrence_index,
+                    )
+                }
+            )
+        )
+    return assigned
 
 
 def _decimal_value(value: str) -> str | None:
@@ -97,8 +128,6 @@ def extract_entities(
     text: str,
     clause_id: str | None,
     evidence: EvidenceRef,
-    *,
-    block_index: int = 0,
 ) -> list[ProtectedEntity]:
     """Extract only explicitly bounded protected values from one source block."""
     matches: list[tuple[int, EntityKind, str, str]] = []
@@ -136,24 +165,11 @@ def extract_entities(
             matches.append((match.start(), EntityKind.PERCENTAGE, match.group(), value))
 
     matches.sort(key=lambda item: (item[0], item[1].value))
-    group_counts = Counter((kind, value) for _, kind, _, value in matches)
-    occurrences: Counter[tuple[EntityKind, str]] = Counter()
     entities: list[ProtectedEntity] = []
     for _, kind, matched_text, value in matches:
-        key = (kind, value)
-        duplicate_location = None
-        if group_counts[key] > 1:
-            duplicate_location = (block_index, occurrences[key])
-            occurrences[key] += 1
         entities.append(
             ProtectedEntity(
-                id=_entity_id(
-                    kind,
-                    value,
-                    clause_id,
-                    evidence.block_id,
-                    duplicate_location,
-                ),
+                id=_entity_id(kind, value, clause_id, evidence.block_id),
                 kind=kind,
                 text=matched_text,
                 normalized_value=value,
@@ -161,4 +177,4 @@ def extract_entities(
                 evidence=[evidence],
             )
         )
-    return entities
+    return assign_clause_entity_ids(entities)

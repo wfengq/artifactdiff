@@ -271,25 +271,34 @@ def test_load_contract_keeps_repeated_entity_ids_unique_and_cross_format_stable(
     from reportlab.pdfgen import canvas
 
     heading = "Section 1 Repeated values"
-    body = "Party A: Acme Ltd; Party A: Acme Ltd; RMB 100 and RMB 100"
+    lines = [
+        "Party A: Acme Ltd;",
+        "Party A: Acme Ltd;",
+        "RMB 100 and",
+        "RMB 100",
+    ]
     docx_path = tmp_path / "repeated.docx"
     document = Document()
     document.add_heading(heading, level=1)
-    document.add_paragraph(body)
+    document.add_paragraph("\n".join(lines))
     document.save(str(docx_path))
     pdf_path = tmp_path / "repeated.pdf"
     pdf = canvas.Canvas(str(pdf_path), invariant=1)
     pdf.drawString(72, 720, heading)
-    pdf.drawString(72, 690, body)
+    for index, line in enumerate(lines):
+        pdf.drawString(72, 690 - index * 30, line)
     pdf.save()
 
-    _, docx_contract = load_contract(
+    docx_snapshot, docx_contract = load_contract(
         docx_path, render=False, force=False, workdir=tmp_path / "docx-work"
     )
-    _, pdf_contract = load_contract(
+    pdf_snapshot, pdf_contract = load_contract(
         pdf_path, render=False, force=False, workdir=tmp_path / "pdf-work"
     )
 
+    assert len(docx_snapshot.blocks) == 2
+    assert len(pdf_snapshot.blocks) == 5
+    assert docx_contract.clauses[0].id == pdf_contract.clauses[0].id
     assert len(docx_contract.entities) == 6
     assert len({item.id for item in docx_contract.entities}) == 6
     assert len({item.id for item in pdf_contract.entities}) == 6
@@ -298,3 +307,5 @@ def test_load_contract_keeps_repeated_entity_ids_unique_and_cross_format_stable(
     ] == [
         (item.kind, item.normalized_value, item.id) for item in docx_contract.entities
     ]
+    assert len({item.evidence[0].block_id for item in docx_contract.entities}) == 1
+    assert len({item.evidence[0].block_id for item in pdf_contract.entities}) == 4

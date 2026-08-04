@@ -214,6 +214,84 @@ def test_analyzer_keeps_every_repeated_entity_occurrence_unique_and_stable() -> 
     assert second.model_dump(mode="json") == first.model_dump(mode="json")
 
 
+def test_analyzer_entity_ids_ignore_equivalent_clause_block_segmentation() -> None:
+    heading = "Section 1 Repeated values"
+    lines = [
+        "Party A: Acme Ltd;",
+        "Party A: Acme Ltd;",
+        "RMB 100 and",
+        "RMB 100",
+    ]
+    one_block = DocumentSnapshot(
+        source_path="one.docx",
+        format="docx",
+        sha256="1" * 64,
+        size_bytes=1,
+        blocks=[
+            ContentBlock(
+                id="one-heading",
+                ordinal=0,
+                content_type=ContentType.HEADING,
+                text=heading,
+                normalized_text=normalize_text(heading),
+            ),
+            ContentBlock(
+                id="one-body",
+                ordinal=1,
+                content_type=ContentType.PARAGRAPH,
+                text="\n".join(lines),
+                normalized_text=normalize_text("\n".join(lines)),
+            ),
+        ],
+    )
+    split_blocks = DocumentSnapshot(
+        source_path="split.pdf",
+        format="pdf",
+        sha256="2" * 64,
+        size_bytes=2,
+        blocks=[
+            ContentBlock(
+                id="split-heading",
+                ordinal=0,
+                content_type=ContentType.PDF_TEXT,
+                text=heading,
+                normalized_text=normalize_text(heading),
+            ),
+            *[
+                ContentBlock(
+                    id=f"split-body-{index}",
+                    ordinal=index,
+                    content_type=ContentType.PDF_TEXT,
+                    text=line,
+                    normalized_text=normalize_text(line),
+                )
+                for index, line in enumerate(lines, start=1)
+            ],
+        ],
+    )
+
+    one = analyze_contract(one_block)
+    split = analyze_contract(split_blocks)
+    split_again = analyze_contract(split_blocks)
+
+    assert one.clauses[0].id == split.clauses[0].id
+    assert [(item.kind, item.normalized_value) for item in one.entities] == [
+        (item.kind, item.normalized_value) for item in split.entities
+    ]
+    assert [item.id for item in one.entities] == [item.id for item in split.entities]
+    assert len({item.id for item in split.entities}) == 6
+    assert [item.evidence[0].block_id for item in one.entities] == ["one-body"] * 6
+    assert [item.evidence[0].block_id for item in split.entities] == [
+        "split-body-1",
+        "split-body-2",
+        "split-body-3",
+        "split-body-3",
+        "split-body-4",
+        "split-body-4",
+    ]
+    assert split_again.model_dump(mode="json") == split.model_dump(mode="json")
+
+
 def test_analyzer_propagates_docx_rendered_geometry_to_all_evidence_consumers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

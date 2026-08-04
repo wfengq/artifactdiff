@@ -6,7 +6,7 @@ from math import isfinite
 
 from pydantic import ValidationError
 
-from artifactdiff.contract.entities import extract_entities
+from artifactdiff.contract.entities import assign_clause_entity_ids, extract_entities
 from artifactdiff.contract.features import CONTRACT_VISIBLE_TEXT_METADATA_KEY
 from artifactdiff.contract.language import detect_language
 from artifactdiff.contract.models import (
@@ -253,16 +253,13 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
     all_entities = []
     for index, draft in enumerate(drafts):
         text = "\n".join(block.text for block in draft.blocks)
-        clause_entities = [
-            entity
-            for block_index, block in enumerate(draft.blocks)
-            for entity in extract_entities(
-                block.text,
-                ids[index],
-                _evidence(block),
-                block_index=block_index,
-            )
-        ]
+        clause_entities = assign_clause_entity_ids(
+            [
+                entity
+                for block in draft.blocks
+                for entity in extract_entities(block.text, ids[index], _evidence(block))
+            ]
+        )
         all_entities.extend(clause_entities)
         children = [ids[child] for child, item in enumerate(drafts) if item.parent_index == index]
         clauses.append(
