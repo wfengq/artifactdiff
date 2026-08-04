@@ -210,6 +210,36 @@ def test_docx_and_pdf_contracts_resolve_the_derived_payment_selector(
     assert candidate.status is SelectorResolutionStatus.HIGH_CONFIDENCE
 
 
+@pytest.mark.parametrize("language", ["zh", "en", "zh-en"])
+def test_docx_payment_selector_relocates_30_to_45_day_pdf_edit(
+    tmp_path: Path, language: ContractLanguage
+) -> None:
+    _, baseline = load_contract(
+        make_contract_docx(
+            tmp_path / "contract.docx", language=language, payment_days=30
+        ),
+        render=False,
+        force=False,
+        workdir=tmp_path / "docx-work",
+    )
+    _, candidate = load_contract(
+        make_contract_pdf(
+            tmp_path / "contract.pdf", language=language, payment_days=45
+        ),
+        render=False,
+        force=False,
+        workdir=tmp_path / "pdf-work",
+    )
+    selector = _selector_for_payment_clause(baseline)
+
+    baseline_resolution = resolve_baseline(baseline, selector)
+    candidate_resolution = resolve_candidate(candidate, selector)
+
+    assert baseline_resolution.status is SelectorResolutionStatus.UNIQUE
+    assert candidate_resolution.status is SelectorResolutionStatus.HIGH_CONFIDENCE
+    assert candidate_resolution.matches[0].clause_id == _payment_clause(candidate).id
+
+
 def test_derived_payment_selector_fails_closed_for_ambiguous_candidate(
     tmp_path: Path,
 ) -> None:

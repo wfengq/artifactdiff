@@ -324,3 +324,95 @@ def test_candidate_runner_up_margin_is_inclusive(
         SelectorMatch(clause_id="clause-best", score=1.0),
         SelectorMatch(clause_id="clause-runner", score=0.95),
     ]
+
+
+def test_candidate_relocates_one_expected_anchor_value_edit() -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="Payment is due within 30 days",
+        baseline_fingerprint="baseline-fingerprint",
+    )
+    candidate = _clause(
+        "clause-payment",
+        label="Article II",
+        heading="Payment Terms",
+        text="Article II Payment Terms\nPayment is due within 45 days",
+    )
+
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is SelectorResolutionStatus.HIGH_CONFIDENCE
+    assert resolution.matches[0].score >= selector.min_similarity
+
+
+def test_candidate_relocates_short_numeric_anchor_inside_longer_line() -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="within 30 days",
+    )
+    candidate = _clause(
+        "clause-payment",
+        label="Article II",
+        heading="Payment Terms",
+        text="Party A shall make payment within 45 days after invoice",
+    )
+
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is SelectorResolutionStatus.HIGH_CONFIDENCE
+
+
+def test_candidate_rejects_duplicate_fuzzy_anchor_occurrences() -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="Payment is due within 30 days",
+        occurrences=1,
+    )
+    candidate = _clause(
+        "clause-payment",
+        label="Article II",
+        heading="Payment Terms",
+        text=(
+            "Article II Payment Terms\n"
+            "Payment is due within 45 days\n"
+            "Payment is due within 46 days"
+        ),
+    )
+
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is SelectorResolutionStatus.MISSING
+    assert resolution.matches[0].score == 0.75
+
+
+def test_candidate_fuzzy_anchor_tie_remains_ambiguous() -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="within 30 days",
+    )
+    document = _contract(
+        _clause(
+            "clause-b",
+            label="Article II",
+            heading="Payment Terms",
+            text="Payment is due within 45 days after invoice",
+        ),
+        _clause(
+            "clause-a",
+            label="Article II",
+            heading="Payment Terms",
+            text="Payment is due within 46 days after invoice",
+        ),
+    )
+
+    resolution = resolve_candidate(document, selector)
+
+    assert resolution.status is SelectorResolutionStatus.AMBIGUOUS
+    assert [match.clause_id for match in resolution.matches] == [
+        "clause-a",
+        "clause-b",
+    ]

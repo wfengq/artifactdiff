@@ -8,6 +8,7 @@ import artifactdiff.formats.docx as docx_module
 from artifactdiff.contract.analyzer import analyze_contract
 from artifactdiff.contract.models import EntityKind, EvidenceRef, ProtectedRegionKind
 from artifactdiff.formats.docx import DocxAdapter
+from artifactdiff.formats.pdf import PdfAdapter
 from artifactdiff.models import (
     ContentBlock,
     ContentType,
@@ -285,3 +286,40 @@ def test_analyzer_ignores_partial_or_invalid_rendered_geometry(
     )
     assert contract.clauses[0].evidence[1].rendered_page_index is None
     assert contract.clauses[0].evidence[1].rendered_bbox is None
+
+
+def test_analyzer_preserves_real_multipage_pdf_clause_and_entity_order(
+    tmp_path: Path,
+) -> None:
+    from reportlab.pdfgen import canvas
+
+    source = tmp_path / "multipage-contract.pdf"
+    document = canvas.Canvas(str(source), invariant=1)
+    document.drawString(72, 720, "Article I Parties")
+    document.drawString(72, 690, "Party A: Alpha Ltd.")
+    document.showPage()
+    document.drawString(72, 720, "Article II Payment Terms")
+    document.drawString(72, 690, "Pay RMB 10,000.00 within 30 days")
+    document.save()
+    snapshot = PdfAdapter().load(source, render=False, workdir=tmp_path / "work")
+
+    first = analyze_contract(snapshot)
+    second = analyze_contract(snapshot)
+
+    assert [(block.page_index, block.ordinal) for block in snapshot.blocks] == [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+    ]
+    assert [clause.heading for clause in first.clauses] == ["Parties", "Payment Terms"]
+    assert "Alpha Ltd." in first.clauses[0].text
+    assert "RMB 10,000.00" not in first.clauses[0].text
+    assert "RMB 10,000.00" in first.clauses[1].text
+    assert any(
+        entity.kind is EntityKind.PARTY for entity in first.clauses[0].entities
+    )
+    assert any(
+        entity.kind is EntityKind.MONEY for entity in first.clauses[1].entities
+    )
+    assert second.model_dump(mode="json") == first.model_dump(mode="json")

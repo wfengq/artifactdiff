@@ -1,5 +1,6 @@
 """Strict models and deterministic contract clause selector resolution."""
 
+import re
 from difflib import SequenceMatcher
 from enum import StrEnum
 from math import fsum
@@ -15,6 +16,11 @@ LABEL_WEIGHT = 0.35
 HEADING_WEIGHT = 0.25
 ANCESTOR_WEIGHT = 0.15
 ANCHOR_FINGERPRINT_WEIGHT = 0.25
+FUZZY_ANCHOR_MIN_SIMILARITY = 0.90
+MAX_FUZZY_ANCHOR_CHARACTERS = 4_096
+MAX_FUZZY_CLAUSE_CHARACTERS = 32_768
+MAX_FUZZY_CLAUSE_LINES = 256
+STABLE_VALUE_PATTERN = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 class ClauseSelector(StrictModel):
@@ -129,6 +135,67 @@ def _similarity(before: str, after: str) -> float:
     ).ratio()
 
 
+def _fuzzy_anchor_scores(
+    clause: ContractClause, selector: ClauseSelector
+) -> list[float]:
+    anchor = normalize_text(selector.anchor)
+    lines = []
+    for line in clause.text.splitlines():
+        normalized = normalize_text(line)
+        if normalized:
+            lines.append(normalized)
+    if (
+        not anchor
+        or len(anchor) > MAX_FUZZY_ANCHOR_CHARACTERS
+        or len(lines) > MAX_FUZZY_CLAUSE_LINES
+        or sum(len(line) for line in lines) > MAX_FUZZY_CLAUSE_CHARACTERS
+        or any(len(line) > MAX_FUZZY_ANCHOR_CHARACTERS for line in lines)
+    ):
+        return []
+    return [
+        score
+        for line in lines
+        if (score := _similarity(anchor, line)) >= FUZZY_ANCHOR_MIN_SIMILARITY
+    ]
+
+
+def _stable_anchor_occurrences(
+    clause: ContractClause, selector: ClauseSelector
+) -> int:
+    anchor = normalize_text(selector.anchor)
+    clause_text = normalize_text(clause.text)
+    if (
+        not STABLE_VALUE_PATTERN.search(anchor)
+        or len(anchor) > MAX_FUZZY_ANCHOR_CHARACTERS
+        or len(clause_text) > MAX_FUZZY_CLAUSE_CHARACTERS
+    ):
+        return 0
+    stable_anchor = STABLE_VALUE_PATTERN.sub("#", anchor)
+    stable_clause = STABLE_VALUE_PATTERN.sub("#", clause_text)
+    return stable_clause.count(stable_anchor)
+
+
+def _candidate_anchor_fingerprint_score(
+    clause: ContractClause, selector: ClauseSelector
+) -> float:
+    fingerprint_matches = bool(selector.baseline_fingerprint) and (
+        clause.fingerprint == selector.baseline_fingerprint
+    )
+    exact_occurrences = _anchor_occurrences(clause, selector)
+    if exact_occurrences:
+        anchor_score = float(exact_occurrences == selector.occurrences)
+    else:
+        stable_occurrences = _stable_anchor_occurrences(clause, selector)
+        if stable_occurrences:
+            anchor_score = float(stable_occurrences == selector.occurrences)
+        else:
+            fuzzy_scores = _fuzzy_anchor_scores(clause, selector)
+            anchor_score = (
+                min(fuzzy_scores) if len(fuzzy_scores) == selector.occurrences else 0.0
+            )
+    return max(float(fingerprint_matches), anchor_score)
+
+
 def _candidate_score(clause: ContractClause, selector: ClauseSelector) -> float:
     label_score = _similarity(selector.clause_label, clause.label.normalized)
     heading_score = _similarity(selector.heading, clause.heading)
@@ -136,13 +203,7 @@ def _candidate_score(clause: ContractClause, selector: ClauseSelector) -> float:
         _normalized_path(clause.ancestor_path)
         == _normalized_path(selector.ancestor_path)
     )
-    anchor_or_fingerprint_score = float(
-        _anchor_occurrences(clause, selector) == selector.occurrences
-        or (
-            bool(selector.baseline_fingerprint)
-            and clause.fingerprint == selector.baseline_fingerprint
-        )
-    )
+    anchor_or_fingerprint_score = _candidate_anchor_fingerprint_score(clause, selector)
     return fsum(
         (
             LABEL_WEIGHT * label_score,

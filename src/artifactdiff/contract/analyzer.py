@@ -175,7 +175,7 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
         raise TypeError("document_features metadata must be a list")
     features = [DocumentFeature.model_validate(item) for item in raw_features]
 
-    for block in sorted(snapshot.blocks, key=lambda item: item.ordinal):
+    for block in snapshot.blocks:
         region_kind = _region_kind(block)
         if region_kind is not None:
             protected_regions.append(_protected_region(block, region_kind, features))
