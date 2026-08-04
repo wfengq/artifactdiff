@@ -20,6 +20,7 @@ from artifactdiff.models import (
     SourceDescriptor,
     VisualPageChange,
 )
+from artifactdiff.reporting.html import write_html
 from artifactdiff.reporting.json import write_json
 from artifactdiff.semantic import diff_snapshots
 from artifactdiff.visual import VisualAssets, compare_images
@@ -246,10 +247,12 @@ def _write_run(
     output_dir: Path,
     visual_assets: dict[str, VisualAssets],
 ) -> ComparisonRun:
-    result = result.model_copy(update={"artifacts": {"json": "report.json"}})
+    result = result.model_copy(update={"artifacts": {"json": "report.json", "html": "report.html"}})
+    html_path = write_html(result, visual_assets, output_dir / "report.html")
     json_path = write_json(result, output_dir / "report.json")
     return ComparisonRun(
         result=result,
         json_path=json_path,
+        html_path=html_path,
         visual_assets=visual_assets,
     )

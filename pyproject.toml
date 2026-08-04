@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["build>=1.2", "mypy>=1.15", "pytest>=8.3", "reportlab>=4.2", "ruff>=0.11"]
+dev = ["beautifulsoup4>=4.12,<5", "build>=1.2", "mypy>=1.15", "pytest>=8.3", "reportlab>=4.2", "ruff>=0.11"]
 
 [project.scripts]
 artifactdiff = "artifactdiff.cli:app"
@@ -26,6 +26,9 @@ artifactdiff-mcp = "artifactdiff.mcp_server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/artifactdiff"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/artifactdiff/reporting/template.html" = "artifactdiff/reporting/template.html"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -38,4 +41,3 @@ line-length = 100
 python_version = "3.11"
 ignore_missing_imports = true
 strict = true
-

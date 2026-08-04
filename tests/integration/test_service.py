@@ -24,3 +24,7 @@ def test_compare_documents_uses_hash_fast_path(
     assert run.result.status == "unchanged"
     assert run.result.summary.total_changes == 0
     assert run.json_path.is_file()
+    assert run.html_path is not None
+    assert run.html_path.is_file()
+    assert run.result.artifacts == {"json": "report.json", "html": "report.html"}
+    assert run.html_path.read_text(encoding="utf-8").count("data:image/") == 0
