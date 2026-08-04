@@ -21,6 +21,7 @@ from artifactdiff.contract.selectors import (
     resolve_baseline,
     resolve_candidate,
 )
+from artifactdiff.contract.service import inspect_contract, load_contract
 
 __all__ = [
     "ClauseLabel",
@@ -38,6 +39,8 @@ __all__ = [
     "SelectorResolution",
     "SelectorResolutionStatus",
     "detect_language",
+    "inspect_contract",
+    "load_contract",
     "resolve_baseline",
     "resolve_candidate",
 ]

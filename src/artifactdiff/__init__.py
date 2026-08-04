@@ -16,6 +16,8 @@ from artifactdiff.contract import (
     SelectorResolution,
     SelectorResolutionStatus,
     detect_language,
+    inspect_contract,
+    load_contract,
     resolve_baseline,
     resolve_candidate,
 )
@@ -60,6 +62,8 @@ __all__ = [
     "SourceDescriptor",
     "VisualPageChange",
     "detect_language",
+    "inspect_contract",
+    "load_contract",
     "resolve_baseline",
     "resolve_candidate",
 ]
