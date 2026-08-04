@@ -1,5 +1,18 @@
 """ArtifactDiff public package interfaces."""
 
+from artifactdiff.contract import (
+    ClauseLabel,
+    ContractClause,
+    ContractDocument,
+    EntityKind,
+    EvidenceRef,
+    LanguageKind,
+    LanguageProfile,
+    ProtectedEntity,
+    ProtectedRegion,
+    ProtectedRegionKind,
+    detect_language,
+)
 from artifactdiff.models import (
     BlockRef,
     ComparisonResult,
@@ -16,15 +29,25 @@ from artifactdiff.models import (
 
 __all__ = [
     "BlockRef",
+    "ClauseLabel",
     "ComparisonResult",
     "ComparisonSummary",
     "ContentBlock",
     "ContentType",
+    "ContractClause",
+    "ContractDocument",
     "DocumentSnapshot",
+    "EntityKind",
+    "EvidenceRef",
+    "LanguageKind",
+    "LanguageProfile",
     "PageSnapshot",
+    "ProtectedEntity",
+    "ProtectedRegion",
+    "ProtectedRegionKind",
     "Rect",
     "SemanticChange",
     "SourceDescriptor",
     "VisualPageChange",
+    "detect_language",
 ]
-
