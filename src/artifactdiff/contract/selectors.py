@@ -20,6 +20,7 @@ FUZZY_ANCHOR_MIN_SIMILARITY = 0.90
 MAX_FUZZY_ANCHOR_CHARACTERS = 4_096
 MAX_FUZZY_CLAUSE_CHARACTERS = 32_768
 MAX_FUZZY_CLAUSE_LINES = 256
+MIN_NONNUMERIC_CONTEXT_CHARACTERS = 6
 STABLE_VALUE_PATTERN = re.compile(r"\d+(?:[.,]\d+)*")
 
 
@@ -135,6 +136,14 @@ def _similarity(before: str, after: str) -> float:
     ).ratio()
 
 
+def _has_sufficient_nonnumeric_context(value: str) -> bool:
+    context_characters = sum(
+        character.isalpha()
+        for character in STABLE_VALUE_PATTERN.sub("", normalize_text(value))
+    )
+    return context_characters >= MIN_NONNUMERIC_CONTEXT_CHARACTERS
+
+
 def _fuzzy_anchor_scores(
     clause: ContractClause, selector: ClauseSelector
 ) -> list[float]:
@@ -146,6 +155,7 @@ def _fuzzy_anchor_scores(
             lines.append(normalized)
     if (
         not anchor
+        or not _has_sufficient_nonnumeric_context(anchor)
         or len(anchor) > MAX_FUZZY_ANCHOR_CHARACTERS
         or len(lines) > MAX_FUZZY_CLAUSE_LINES
         or sum(len(line) for line in lines) > MAX_FUZZY_CLAUSE_CHARACTERS
@@ -159,20 +169,70 @@ def _fuzzy_anchor_scores(
     ]
 
 
+def _numeric_anchor_pattern(
+    anchor: str,
+) -> tuple[re.Pattern[str], tuple[str, ...]] | None:
+    token_matches = list(STABLE_VALUE_PATTERN.finditer(anchor))
+    if not token_matches:
+        return None
+
+    pattern_parts: list[str] = []
+    anchor_tokens: list[str] = []
+    preceding_end = 0
+    for token_match in token_matches:
+        pattern_parts.append(re.escape(anchor[preceding_end : token_match.start()]))
+        pattern_parts.append(f"({STABLE_VALUE_PATTERN.pattern})")
+        anchor_tokens.append(token_match.group())
+        preceding_end = token_match.end()
+    pattern_parts.append(re.escape(anchor[preceding_end:]))
+    return re.compile("".join(pattern_parts)), tuple(anchor_tokens)
+
+
+def _numeric_token_shape(value: str) -> str:
+    return "".join("#" if character.isdecimal() else character for character in value)
+
+
+def _has_one_compatible_numeric_edit(
+    anchor_tokens: tuple[str, ...], candidate_tokens: tuple[str, ...]
+) -> bool:
+    changed_tokens = [
+        (anchor_token, candidate_token)
+        for anchor_token, candidate_token in zip(
+            anchor_tokens, candidate_tokens, strict=True
+        )
+        if anchor_token != candidate_token
+    ]
+    return len(changed_tokens) == 1 and (
+        _numeric_token_shape(changed_tokens[0][0])
+        == _numeric_token_shape(changed_tokens[0][1])
+    )
+
+
 def _stable_anchor_occurrences(
     clause: ContractClause, selector: ClauseSelector
 ) -> int:
     anchor = normalize_text(selector.anchor)
     clause_text = normalize_text(clause.text)
     if (
-        not STABLE_VALUE_PATTERN.search(anchor)
+        not _has_sufficient_nonnumeric_context(anchor)
         or len(anchor) > MAX_FUZZY_ANCHOR_CHARACTERS
         or len(clause_text) > MAX_FUZZY_CLAUSE_CHARACTERS
     ):
         return 0
-    stable_anchor = STABLE_VALUE_PATTERN.sub("#", anchor)
-    stable_clause = STABLE_VALUE_PATTERN.sub("#", clause_text)
-    return stable_clause.count(stable_anchor)
+    numeric_anchor = _numeric_anchor_pattern(anchor)
+    if numeric_anchor is None:
+        return 0
+    anchor_pattern, anchor_tokens = numeric_anchor
+    matches = list(anchor_pattern.finditer(clause_text))
+    if not matches:
+        return 0
+    for match in matches:
+        candidate_tokens = tuple(
+            match.group(index) for index in range(1, len(anchor_tokens) + 1)
+        )
+        if not _has_one_compatible_numeric_edit(anchor_tokens, candidate_tokens):
+            return 0
+    return len(matches)
 
 
 def _candidate_anchor_fingerprint_score(
@@ -184,15 +244,14 @@ def _candidate_anchor_fingerprint_score(
     exact_occurrences = _anchor_occurrences(clause, selector)
     if exact_occurrences:
         anchor_score = float(exact_occurrences == selector.occurrences)
-    else:
+    elif STABLE_VALUE_PATTERN.search(normalize_text(selector.anchor)):
         stable_occurrences = _stable_anchor_occurrences(clause, selector)
-        if stable_occurrences:
-            anchor_score = float(stable_occurrences == selector.occurrences)
-        else:
-            fuzzy_scores = _fuzzy_anchor_scores(clause, selector)
-            anchor_score = (
-                min(fuzzy_scores) if len(fuzzy_scores) == selector.occurrences else 0.0
-            )
+        anchor_score = float(stable_occurrences == selector.occurrences)
+    else:
+        fuzzy_scores = _fuzzy_anchor_scores(clause, selector)
+        anchor_score = (
+            min(fuzzy_scores) if len(fuzzy_scores) == selector.occurrences else 0.0
+        )
     return max(float(fingerprint_matches), anchor_score)
 
 

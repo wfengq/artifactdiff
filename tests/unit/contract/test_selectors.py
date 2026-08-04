@@ -364,6 +364,124 @@ def test_candidate_relocates_short_numeric_anchor_inside_longer_line() -> None:
     assert resolution.status is SelectorResolutionStatus.HIGH_CONFIDENCE
 
 
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "45",
+        "99",
+        "999999",
+        "Unrelated audit cap is 999999 records",
+    ],
+)
+def test_candidate_rejects_changed_numeric_only_anchor(
+    candidate_text: str,
+) -> None:
+    baseline = _clause(
+        "clause-baseline",
+        label="Article II",
+        heading="Payment Terms",
+        text="30",
+    )
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="30",
+        baseline_fingerprint=baseline.fingerprint,
+    )
+    candidate = _clause(
+        "clause-candidate",
+        label="Article II",
+        heading="Payment Terms",
+        text=candidate_text,
+    )
+
+    baseline_resolution = resolve_baseline(_contract(baseline), selector)
+    candidate_resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert baseline_resolution.status is SelectorResolutionStatus.UNIQUE
+    assert candidate_resolution.status is SelectorResolutionStatus.MISSING
+    assert candidate_resolution.matches == [
+        SelectorMatch(clause_id="clause-candidate", score=0.75)
+    ]
+
+
+def test_candidate_rejects_changed_numeric_anchor_with_only_punctuation_context() -> None:
+    baseline = _clause(
+        "clause-baseline",
+        label="Article II",
+        heading="Payment Terms",
+        text="--- 30 !!!",
+    )
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="--- 30 !!!",
+        baseline_fingerprint=baseline.fingerprint,
+    )
+    candidate = _clause(
+        "clause-candidate",
+        label="Article II",
+        heading="Payment Terms",
+        text="--- 45 !!!",
+    )
+
+    assert (
+        resolve_baseline(_contract(baseline), selector).status
+        is SelectorResolutionStatus.UNIQUE
+    )
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is SelectorResolutionStatus.MISSING
+    assert resolution.matches[0].score == 0.75
+
+
+def test_candidate_rejects_unrelated_contextual_number() -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="within 30 days",
+    )
+    candidate = _clause(
+        "clause-candidate",
+        label="Article II",
+        heading="Payment Terms",
+        text="Unrelated audit cap is 999999 records",
+    )
+
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is SelectorResolutionStatus.MISSING
+    assert resolution.matches[0].score == 0.75
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "Payment is due within 45 days with a 7 percent fee",
+        "Payment is due within 999999 days with a 5 percent fee",
+    ],
+)
+def test_candidate_rejects_incompatible_numeric_token_edits(
+    candidate_text: str,
+) -> None:
+    selector = ClauseSelector(
+        clause_label="Article II",
+        heading="Payment Terms",
+        anchor="Payment is due within 30 days with a 5 percent fee",
+    )
+    candidate = _clause(
+        "clause-candidate",
+        label="Article II",
+        heading="Payment Terms",
+        text=candidate_text,
+    )
+
+    resolution = resolve_candidate(_contract(candidate), selector)
+
+    assert resolution.status is SelectorResolutionStatus.MISSING
+    assert resolution.matches[0].score == 0.75
+
+
 def test_candidate_rejects_duplicate_fuzzy_anchor_occurrences() -> None:
     selector = ClauseSelector(
         clause_label="Article II",
