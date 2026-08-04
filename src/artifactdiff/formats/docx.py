@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 from zipfile import BadZipFile
 
 from docx import Document
@@ -14,8 +13,14 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from lxml.etree import XMLSyntaxError
+from pydantic import JsonValue
 
-from artifactdiff.contract.features import FeatureInspectionError, inspect_docx_features
+from artifactdiff.contract.features import (
+    FeatureInspectionError,
+    inspect_docx_features,
+    visible_ooxml_paragraph_text,
+    visible_ooxml_table_text,
+)
 from artifactdiff.errors import ArtifactDiffError, InputValidationError, RenderUnavailableError
 from artifactdiff.formats.pdf import PdfAdapter
 from artifactdiff.libreoffice import convert_docx_to_pdf, find_libreoffice
@@ -32,33 +37,6 @@ def iter_body_items(document: DocumentType) -> Iterator[Paragraph | Table]:
             yield Table(child, document)
 
 
-def _visible_paragraph_text(paragraph: Paragraph) -> str:
-    pieces: list[str] = []
-
-    def visit(node: Any) -> None:
-        tag = getattr(node, "tag", "")
-        if tag in {qn("w:ins"), qn("w:del")}:
-            return
-        if tag == qn("w:r"):
-            properties = node.find(qn("w:rPr"))
-            if properties is not None and any(
-                properties.find(qn(f"w:{kind}")) is not None
-                for kind in ("vanish", "webHidden")
-            ):
-                return
-        if tag == qn("w:t") and node.text:
-            pieces.append(str(node.text))
-        elif tag == qn("w:tab"):
-            pieces.append("\t")
-        elif tag in {qn("w:br"), qn("w:cr")}:
-            pieces.append("\n")
-        for child in node:
-            visit(child)
-
-    visit(paragraph._p)
-    return "".join(pieces)
-
-
 class DocxAdapter:
     """Create a semantic snapshot from DOCX body structure."""
 
@@ -67,7 +45,7 @@ class DocxAdapter:
     ) -> DocumentSnapshot:
         """Extract ordered paragraphs and tables from a DOCX source."""
         try:
-            document = Document(path)
+            document = Document(str(path))
         except (
             BadZipFile,
             KeyError,
@@ -130,9 +108,9 @@ class DocxAdapter:
             for section in document.sections:
                 part = getattr(section, part_name)
                 text = "\n".join(
-                    paragraph.text.strip()
+                    visible_ooxml_paragraph_text(paragraph._p).strip()
                     for paragraph in part.paragraphs
-                    if paragraph.text.strip()
+                    if visible_ooxml_paragraph_text(paragraph._p).strip()
                 )
                 if not text or text in seen:
                     continue
@@ -151,11 +129,11 @@ class DocxAdapter:
     @staticmethod
     def _body_block(item: Paragraph | Table, ordinal: int) -> ContentBlock | None:
         if isinstance(item, Paragraph):
-            text = _visible_paragraph_text(item).strip()
+            text = visible_ooxml_paragraph_text(item._p).strip()
             if not text:
                 return None
             style_name = item.style.name if item.style is not None else ""
-            metadata: dict[str, int] = {}
+            metadata: dict[str, JsonValue] = {}
             content_type = ContentType.PARAGRAPH
             if style_name.startswith("Heading "):
                 try:
@@ -175,14 +153,7 @@ class DocxAdapter:
                     }
                     break
         else:
-            rows = [
-                [
-                    "\n".join(_visible_paragraph_text(paragraph) for paragraph in cell.paragraphs)
-                    for cell in row.cells
-                ]
-                for row in item.rows
-            ]
-            text = "\n".join("\t".join(cells) for cells in rows)
+            text = visible_ooxml_table_text(item._tbl)
             if not text.strip():
                 return None
             content_type = ContentType.TABLE

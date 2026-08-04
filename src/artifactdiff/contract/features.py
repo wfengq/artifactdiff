@@ -7,6 +7,7 @@ import json
 from collections import defaultdict
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
+from typing import Any
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
@@ -31,6 +32,7 @@ _W_P = f"{{{W}}}p"
 _W_T = f"{{{W}}}t"
 _W_TAB = f"{{{W}}}tab"
 _W_BR = f"{{{W}}}br"
+_W_CR = f"{{{W}}}cr"
 _W_INS = f"{{{W}}}ins"
 _W_DEL = f"{{{W}}}del"
 _W_R = f"{{{W}}}r"
@@ -150,10 +152,11 @@ def _relationship_target(owner: str, target: str) -> str:
     return "/".join(parts)
 
 
-def _paragraph_text(paragraph: ElementTree.Element) -> str:
+def visible_ooxml_paragraph_text(paragraph: Any) -> str:
+    """Return paragraph text excluding revisions and hidden runs."""
     pieces: list[str] = []
 
-    def visit(node: ElementTree.Element) -> None:
+    def visit(node: Any) -> None:
         if node.tag in {_W_INS, _W_DEL}:
             return
         if node.tag == _W_R:
@@ -167,27 +170,36 @@ def _paragraph_text(paragraph: ElementTree.Element) -> str:
             pieces.append(node.text)
         elif node.tag == _W_TAB:
             pieces.append("\t")
-        elif node.tag == _W_BR:
+        elif node.tag in {_W_BR, _W_CR}:
             pieces.append("\n")
         for child in node:
             visit(child)
 
     visit(paragraph)
-    return "".join(pieces).strip()
+    return "".join(pieces)
 
 
-def _document_evidence(
-    root: ElementTree.Element,
-) -> tuple[dict[int, EvidenceRef], dict[int, EvidenceRef]]:
+def visible_ooxml_table_text(table: Any) -> str:
+    """Return table text using the same row/cell/paragraph shape as the DOCX adapter."""
+    rows: list[str] = []
+    for row in table.findall(f"./{{{W}}}tr"):
+        cells: list[str] = []
+        for cell in row.findall(f"./{{{W}}}tc"):
+            paragraphs = cell.findall(f"./{{{W}}}p")
+            cells.append("\n".join(visible_ooxml_paragraph_text(item) for item in paragraphs))
+        rows.append("\t".join(cells))
+    return "\n".join(rows)
+
+
+def _document_evidence(root: ElementTree.Element) -> dict[int, EvidenceRef]:
     body = root.find(f".//{{{W}}}body")
     if body is None:
-        return {}, {}
-    paragraph_evidence: dict[int, EvidenceRef] = {}
+        return {}
     descendant_evidence: dict[int, EvidenceRef] = {}
     ordinal = 0
     for child in body:
         if child.tag == _W_P:
-            text = _paragraph_text(child)
+            text = visible_ooxml_paragraph_text(child).strip()
             if not text:
                 continue
             style = child.find(f"./{{{W}}}pPr/{{{W}}}pStyle")
@@ -197,15 +209,20 @@ def _document_evidence(
             )
             block_id = f"docx:{ordinal}:{content_type}:{fingerprint(text)}"
             evidence = EvidenceRef(block_id=block_id)
-            paragraph_evidence[id(child)] = evidence
             for descendant in child.iter():
                 descendant_evidence[id(descendant)] = evidence
             ordinal += 1
         elif child.tag == f"{{{W}}}tbl":
-            table_text = "".join(node.text or "" for node in child.iter(_W_T))
-            if table_text.strip():
-                ordinal += 1
-    return paragraph_evidence, descendant_evidence
+            text = visible_ooxml_table_text(child)
+            if not text.strip():
+                continue
+            evidence = EvidenceRef(
+                block_id=f"docx:{ordinal}:{ContentType.TABLE}:{fingerprint(text)}"
+            )
+            for descendant in child.iter():
+                descendant_evidence[id(descendant)] = evidence
+            ordinal += 1
+    return descendant_evidence
 
 
 def _metadata_features(roots: Mapping[str, ElementTree.Element]) -> list[DocumentFeature]:
@@ -240,23 +257,51 @@ def _sanitized_uri(target: str) -> tuple[str, str, str]:
     return scheme, host_hash, _sha256(normalized_target.encode("utf-8"))
 
 
+def _relationship_part(owner: str) -> str:
+    path = PurePosixPath(owner)
+    return str(path.parent / "_rels" / f"{path.name}.rels")
+
+
+def _relevant_ooxml_parts(names: set[str]) -> list[str]:
+    content_parts = {
+        name
+        for name in names
+        if name == "word/document.xml"
+        or name.startswith(("word/header", "word/footer")) and name.endswith(".xml")
+        or name in {"word/endnotes.xml", "word/footnotes.xml"}
+    }
+    xml_parts = content_parts | {
+        name
+        for name in ("docProps/app.xml", "docProps/core.xml", "word/comments.xml")
+        if name in names
+    }
+    relationship_parts = {
+        relationship_part
+        for owner in content_parts
+        if (relationship_part := _relationship_part(owner)) in names
+    }
+    return sorted(xml_parts | relationship_parts)
+
+
+def _read_docx_part(path: Path, part_name: str) -> bytes:
+    try:
+        with ZipFile(path) as package:
+            return package.read(part_name)
+    except (BadZipFile, KeyError, OSError) as error:
+        raise FeatureInspectionError(f"OOXML part is missing: {part_name}") from error
+
+
 def inspect_docx_features(path: Path) -> list[DocumentFeature]:
     """Inspect bounded OOXML feature facts from a validated DOCX package."""
     try:
         with ZipFile(path) as package:
-            payloads = {
-                name: package.read(name)
-                for name in sorted(package.namelist())
-                if not name.endswith("/")
+            names = {name for name in package.namelist() if not name.endswith("/")}
+            roots = {
+                name: _xml(package.read(name), name)
+                for name in _relevant_ooxml_parts(names)
             }
     except (BadZipFile, KeyError, OSError) as error:
         raise FeatureInspectionError("invalid OOXML package") from error
-
-    roots = {
-        name: _xml(payload, name)
-        for name, payload in payloads.items()
-        if name.endswith((".xml", ".rels"))
-    }
     relationships: dict[str, dict[str, ElementTree.Element]] = {}
     for part_name in sorted(name for name in roots if name.endswith(".rels")):
         owner = _relationship_owner(part_name)
@@ -269,7 +314,7 @@ def inspect_docx_features(path: Path) -> list[DocumentFeature]:
     main_root = roots.get("word/document.xml")
     descendants: dict[int, EvidenceRef] = {}
     if main_root is not None:
-        _, descendants = _document_evidence(main_root)
+        descendants = _document_evidence(main_root)
 
     features = _metadata_features(roots)
     content_parts = [
@@ -370,9 +415,7 @@ def inspect_docx_features(path: Path) -> list[DocumentFeature]:
             if target is None:
                 raise FeatureInspectionError(f"image relationship has no target: {part_name}")
             image_part = _relationship_target(part_name, target)
-            image_bytes = payloads.get(image_part)
-            if image_bytes is None:
-                raise FeatureInspectionError(f"image part is missing: {image_part}")
+            image_bytes = _read_docx_part(path, image_part)
             evidence = [descendants[id(blip)]] if id(blip) in descendants else []
             features.append(
                 _make_feature(
@@ -466,15 +509,21 @@ def _pdf_image_fingerprint(
         rawdata = getattr(stream, "rawdata", None)
         if isinstance(rawdata, bytes):
             return _sha256(rawdata), "content"
-    object_id = image.get("object_id") or getattr(stream, "objid", None)
-    if object_id is not None:
-        return fingerprint(f"pdf-image-object:{_pdf_scalar(object_id)}"), "object"
-    geometry = bbox.model_dump_json() if bbox is not None else "no-bbox"
-    return fingerprint(f"pdf-image-geometry:{page_index}:{geometry}"), "geometry"
+    intrinsic: dict[str, JsonValue] = {}
+    for key in ("bits", "colorspace", "height", "imagemask", "srcsize", "width"):
+        value = image.get(key)
+        if value is not None and isinstance(value, (str, bytes, int, float, bool)):
+            intrinsic[key] = _pdf_scalar(value)
+    geometry: dict[str, JsonValue] = {
+        "bbox": bbox.model_dump(mode="json") if bbox is not None else None,
+        "intrinsic": intrinsic,
+        "page_index": page_index,
+    }
+    confidence = "intrinsic_geometry" if intrinsic else "geometry_only"
+    return fingerprint(_canonical_details(geometry)), confidence
 
 
-def inspect_pdf_features(document: PDF) -> list[DocumentFeature]:
-    """Inspect bounded PDF metadata, external annotations, and image facts."""
+def _inspect_pdf_features(document: PDF) -> list[DocumentFeature]:
     features: list[DocumentFeature] = []
     metadata = document.metadata or {}
     if not isinstance(metadata, Mapping):
@@ -552,3 +601,13 @@ def inspect_pdf_features(document: PDF) -> list[DocumentFeature]:
                 )
             )
     return _merge_and_sort(features)
+
+
+def inspect_pdf_features(document: PDF) -> list[DocumentFeature]:
+    """Inspect bounded PDF metadata, external annotations, and image facts."""
+    try:
+        return _inspect_pdf_features(document)
+    except FeatureInspectionError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise FeatureInspectionError("malformed PDF feature structure") from error

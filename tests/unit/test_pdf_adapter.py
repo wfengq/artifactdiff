@@ -6,11 +6,24 @@ from pdfminer.pdfdocument import PDFPasswordIncorrect
 from pdfplumber.utils.exceptions import PdfminerException
 
 import artifactdiff.formats.pdf as pdf_module
+from artifactdiff.contract.features import inspect_pdf_features
 from artifactdiff.errors import InputValidationError, ResourceLimitError, UnsupportedFormatError
 from artifactdiff.formats import adapter_for
 from artifactdiff.formats.pdf import PdfAdapter
 from artifactdiff.models import PageSnapshot
 from tests.factories import make_pdf
+
+
+def make_feature_pdf(path: Path, image_path: Path) -> Path:
+    from reportlab.pdfgen import canvas
+
+    document = canvas.Canvas(str(path), invariant=1)
+    document.setAuthor("Private PDF Author")
+    document.drawString(72, 720, "Signature")
+    document.drawImage(str(image_path), 72, 680, width=20, height=20)
+    document.linkURL("https://example.test/private", (72, 710, 140, 730))
+    document.save()
+    return path
 
 
 class FakePage:
@@ -61,17 +74,10 @@ def test_pdf_adapter_extracts_text_geometry_and_renders(tmp_path: Path) -> None:
 
 def test_pdf_adapter_extracts_bounded_metadata_link_and_image_features(tmp_path: Path) -> None:
     from PIL import Image
-    from reportlab.pdfgen import canvas
 
     image_path = tmp_path / "stamp.png"
     Image.new("RGB", (8, 8), "red").save(image_path)
-    source = tmp_path / "features.pdf"
-    document = canvas.Canvas(str(source), invariant=1)
-    document.setAuthor("Private PDF Author")
-    document.drawString(72, 720, "Signature")
-    document.drawImage(str(image_path), 72, 680, width=20, height=20)
-    document.linkURL("https://example.test/private", (72, 710, 140, 730))
-    document.save()
+    source = make_feature_pdf(tmp_path / "features.pdf", image_path)
 
     snapshot = PdfAdapter().load(source, render=False, workdir=tmp_path / "work")
 
@@ -84,6 +90,126 @@ def test_pdf_adapter_extracts_bounded_metadata_link_and_image_features(tmp_path:
     serialized = json.dumps(facts, sort_keys=True)
     assert "Private PDF Author" not in serialized
     assert "https://example.test/private" not in serialized
+
+
+def test_pdf_adapter_feature_json_is_stable_across_equivalent_rewrites(tmp_path: Path) -> None:
+    from PIL import Image
+
+    image_path = tmp_path / "stamp.png"
+    Image.new("RGB", (8, 8), "red").save(image_path)
+    first = PdfAdapter().load(
+        make_feature_pdf(tmp_path / "first.pdf", image_path),
+        render=False,
+        workdir=tmp_path / "first-work",
+    )
+    second = PdfAdapter().load(
+        make_feature_pdf(tmp_path / "second.pdf", image_path),
+        render=False,
+        workdir=tmp_path / "second-work",
+    )
+
+    assert second.metadata["document_features"] == first.metadata["document_features"]
+
+
+class ObjectOnlyStream:
+    def __init__(self, objid: int) -> None:
+        self.objid = objid
+
+
+def test_pdf_image_fallback_ignores_unstable_object_numbers() -> None:
+    first_page = FakePage()
+    first_page.images = [
+        {
+            "x0": 10,
+            "top": 20,
+            "x1": 30,
+            "bottom": 40,
+            "width": 20,
+            "height": 20,
+            "bits": 8,
+            "stream": ObjectOnlyStream(7),
+        }
+    ]
+    second_page = FakePage()
+    second_page.images = [
+        {
+            "x0": 10,
+            "top": 20,
+            "x1": 30,
+            "bottom": 40,
+            "width": 20,
+            "height": 20,
+            "bits": 8,
+            "stream": ObjectOnlyStream(91),
+        }
+    ]
+    first = FakeDocument(0)
+    first.pages = [first_page]
+    second = FakeDocument(0)
+    second.pages = [second_page]
+
+    assert [item.model_dump(mode="json") for item in inspect_pdf_features(second)] == [
+        item.model_dump(mode="json") for item in inspect_pdf_features(first)
+    ]
+
+
+class OptionalAccessorPage(FakePage):
+    def __init__(self, failing_attribute: str | None = None) -> None:
+        self.failing_attribute = failing_attribute
+
+    @property
+    def annots(self) -> list[object]:
+        if self.failing_attribute == "annots":
+            raise KeyError("broken annotations")
+        return []
+
+    @property
+    def images(self) -> list[object]:
+        if self.failing_attribute == "images":
+            raise TypeError("broken images")
+        return []
+
+
+class OptionalAccessorDocument(FakeDocument):
+    def __init__(self, failing_attribute: str) -> None:
+        self.failing_attribute = failing_attribute
+        self.pages = [OptionalAccessorPage(failing_attribute)]
+
+    @property
+    def metadata(self) -> dict[str, object]:
+        if self.failing_attribute == "metadata":
+            raise ValueError("broken metadata")
+        return {}
+
+
+@pytest.mark.parametrize("failing_attribute", ["metadata", "annots", "images"])
+def test_pdf_adapter_translates_optional_feature_accessor_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_attribute: str
+) -> None:
+    source = tmp_path / f"broken-{failing_attribute}.pdf"
+    source.write_bytes(b"%PDF-1.4")
+    monkeypatch.setattr(
+        pdf_module.pdfplumber,
+        "open",
+        lambda _: OptionalAccessorDocument(failing_attribute),
+    )
+
+    with pytest.raises(InputValidationError, match="invalid PDF"):
+        PdfAdapter().load(source, render=False, workdir=tmp_path / "work")
+
+
+@pytest.mark.parametrize("attribute", ["annots", "images"])
+def test_pdf_adapter_rejects_malformed_optional_feature_shapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attribute: str
+) -> None:
+    source = tmp_path / f"malformed-{attribute}.pdf"
+    source.write_bytes(b"%PDF-1.4")
+    document = FakeDocument(1)
+    setattr(document.pages[0], attribute, {"not": "a list"})
+    monkeypatch.setattr(pdf_module.pdfplumber, "open", lambda _: document)
+
+    with pytest.raises(InputValidationError, match="invalid PDF"):
+        PdfAdapter().load(source, render=False, workdir=tmp_path / "work")
 
 
 def test_pdf_adapter_preserves_reading_order_and_renders_at_144_dpi(tmp_path: Path) -> None:

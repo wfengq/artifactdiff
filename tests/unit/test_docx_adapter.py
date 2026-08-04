@@ -93,6 +93,37 @@ def test_docx_adapter_appends_unique_non_empty_headers_and_footers(tmp_path: Pat
     assert [block.ordinal for block in snapshot.blocks] == [0, 1, 2]
 
 
+def test_docx_adapter_keeps_hidden_header_and_footer_text_out_of_semantic_blocks(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "hidden-sections.docx"
+    document = Document()
+    document.add_paragraph("Body text")
+    header = document.sections[0].header.paragraphs[0]
+    header.add_run("Visible header")
+    hidden_header = header.add_run(" Private header note")
+    hidden_header.font.hidden = True
+    hidden_footer = document.sections[0].footer.paragraphs[0].add_run(
+        "Private footer note"
+    )
+    hidden_footer.font.hidden = True
+    document.save(source)
+
+    snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
+
+    assert [block.text for block in snapshot.blocks] == ["Body text", "Visible header"]
+    serialized = snapshot.model_dump_json()
+    assert "Private header note" not in serialized
+    assert "Private footer note" not in serialized
+    hidden_parts = {
+        item["details"]["part_name"]
+        for item in snapshot.metadata["document_features"]
+        if item["kind"] == "hidden_text"
+    }
+    assert any(part.startswith("word/header") for part in hidden_parts)
+    assert any(part.startswith("word/footer") for part in hidden_parts)
+
+
 def test_docx_adapter_rejects_corrupt_docx_with_domain_error(tmp_path: Path) -> None:
     source = tmp_path / "broken.docx"
     source.write_bytes(b"not an OOXML package")

@@ -12,6 +12,7 @@ from lxml import etree
 from PIL import Image
 
 from artifactdiff.contract.analyzer import analyze_contract
+from artifactdiff.contract.features import inspect_docx_features
 from artifactdiff.formats.docx import DocxAdapter
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -138,6 +139,11 @@ def _feature_fingerprints(path: Path, workdir: Path) -> dict[str, list[str]]:
     return {kind: sorted(values) for kind, values in sorted(grouped.items())}
 
 
+def _serialized_features(path: Path, workdir: Path) -> list[object]:
+    snapshot = DocxAdapter().load(path, render=False, workdir=workdir)
+    return snapshot.metadata["document_features"]
+
+
 def test_docx_features_detect_comments_revisions_hidden_text_links_and_metadata(
     tmp_path: Path,
 ) -> None:
@@ -168,7 +174,9 @@ def test_docx_feature_json_is_stable_and_each_mutation_is_isolated_by_kind(
     repeated = make_featured_docx(tmp_path / "repeated.docx")
     baseline_fingerprints = _feature_fingerprints(baseline, tmp_path / "baseline-work")
 
-    assert _feature_fingerprints(repeated, tmp_path / "repeated-work") == baseline_fingerprints
+    assert _serialized_features(repeated, tmp_path / "repeated-work") == _serialized_features(
+        baseline, tmp_path / "baseline-features-work"
+    )
 
     mutations = {
         "comment": {"comment": "Internal comment beta"},
@@ -216,3 +224,52 @@ def test_hidden_text_in_table_is_reported_only_as_a_bounded_feature(tmp_path: Pa
     assert snapshot.blocks[0].text.strip() == "Visible term"
     assert any(item.kind.value == "hidden_text" for item in contract.features)
     assert "Secret table term" not in contract.model_dump_json()
+
+
+def test_docx_image_after_hidden_only_table_uses_actual_signature_block_evidence(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "hidden-table-signature.docx"
+    document = Document()
+    hidden_cell_run = document.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0].add_run(
+        "Hidden-only table"
+    )
+    hidden_cell_run.font.hidden = True
+    signature = document.add_paragraph("Signature: Alice ")
+    signature.add_run().add_picture(BytesIO(_png_bytes("red")), width=Inches(0.1))
+    document.save(source)
+
+    snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
+    contract = analyze_contract(snapshot)
+    image = next(item for item in contract.features if item.kind.value == "embedded_image")
+
+    assert [block.id for block in snapshot.blocks] == [image.evidence[0].block_id]
+    assert contract.protected_regions[0].feature_fingerprints == [image.fingerprint]
+
+
+def test_docx_table_image_maps_to_containing_table_block(tmp_path: Path) -> None:
+    source = tmp_path / "table-image.docx"
+    document = Document()
+    cell = document.add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = "Signature: Alice "
+    cell.paragraphs[0].add_run().add_picture(BytesIO(_png_bytes("red")), width=Inches(0.1))
+    document.save(source)
+
+    snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
+    image = next(
+        item
+        for item in analyze_contract(snapshot).features
+        if item.kind.value == "embedded_image"
+    )
+
+    assert image.evidence[0].block_id == snapshot.blocks[0].id
+
+
+def test_docx_feature_inspection_ignores_unrelated_malformed_custom_xml(tmp_path: Path) -> None:
+    source = make_featured_docx(tmp_path / "custom-xml.docx")
+    expected = [item.model_dump(mode="json") for item in inspect_docx_features(source)]
+    _rewrite_package(source, {"customXml/unrelated.xml": b"<malformed"})
+
+    actual = [item.model_dump(mode="json") for item in inspect_docx_features(source)]
+
+    assert actual == expected
