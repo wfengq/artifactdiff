@@ -16,8 +16,17 @@ from artifactdiff.policy.models import (
     ProtectedTarget,
     VisualPolicy,
 )
+from artifactdiff.policy.profile import CONTRACT_SAFE_PROFILE_VERSION
+from artifactdiff.policy.service import (
+    draft_exact_replace_policy,
+    freeze_policy,
+    load_frozen_policy,
+    validate_policy,
+    write_frozen_policy,
+)
 
 __all__ = [
+    "CONTRACT_SAFE_PROFILE_VERSION",
     "AllowRule",
     "ContractPolicy",
     "EvidenceMode",
@@ -31,7 +40,12 @@ __all__ = [
     "ProtectedTarget",
     "VisualPolicy",
     "canonical_policy_bytes",
+    "draft_exact_replace_policy",
+    "freeze_policy",
+    "load_frozen_policy",
     "load_policy",
     "policy_digest",
+    "validate_policy",
+    "write_frozen_policy",
     "write_policy",
 ]

@@ -35,6 +35,7 @@ from artifactdiff.models import (
     VisualPageChange,
 )
 from artifactdiff.policy import (
+    CONTRACT_SAFE_PROFILE_VERSION,
     AllowRule,
     ContractPolicy,
     EvidenceMode,
@@ -48,12 +49,18 @@ from artifactdiff.policy import (
     ProtectedTarget,
     VisualPolicy,
     canonical_policy_bytes,
+    draft_exact_replace_policy,
+    freeze_policy,
+    load_frozen_policy,
     load_policy,
     policy_digest,
+    validate_policy,
+    write_frozen_policy,
     write_policy,
 )
 
 __all__ = [
+    "CONTRACT_SAFE_PROFILE_VERSION",
     "AllowRule",
     "BlockRef",
     "ClauseLabel",
@@ -93,11 +100,16 @@ __all__ = [
     "VisualPolicy",
     "canonical_policy_bytes",
     "detect_language",
+    "draft_exact_replace_policy",
+    "freeze_policy",
     "inspect_contract",
     "load_contract",
+    "load_frozen_policy",
     "load_policy",
     "policy_digest",
     "resolve_baseline",
     "resolve_candidate",
+    "validate_policy",
+    "write_frozen_policy",
     "write_policy",
 ]
