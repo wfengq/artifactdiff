@@ -279,6 +279,128 @@ def test_one_sided_duplicate_classification_is_permutation_stable() -> None:
     assert ordered.model_dump_json() == permuted.model_dump_json()
 
 
+def test_identical_one_sided_occurrences_have_unique_permutation_stable_fact_ids() -> None:
+    first = _clause("baseline-a", "Article II Payment Terms\nIdentical body.").model_copy(
+        update={
+            "evidence": [
+                EvidenceRef(block_id="first-a", page_index=0),
+                EvidenceRef(block_id="first-b", page_index=1),
+            ]
+        }
+    )
+    second = _clause("baseline-b", "Article II Payment Terms\nIdentical body.").model_copy(
+        update={
+            "evidence": [
+                EvidenceRef(block_id="second-a", page_index=2),
+                EvidenceRef(block_id="second-b", page_index=3),
+            ]
+        }
+    )
+    third = _clause("baseline-c", "Article II Payment Terms\nIdentical body.").model_copy(
+        update={
+            "evidence": [
+                EvidenceRef(block_id="third-a", page_index=4),
+                EvidenceRef(block_id="third-b", page_index=5),
+            ]
+        }
+    )
+    permuted_first = first.model_copy(update={"evidence": list(reversed(first.evidence))})
+    permuted_second = second.model_copy(update={"evidence": list(reversed(second.evidence))})
+    permuted_third = third.model_copy(update={"evidence": list(reversed(third.evidence))})
+
+    ordered = diff_contracts(_contract(first, second, third), _contract(sha="b"))
+    permuted = diff_contracts(
+        _contract(permuted_third, permuted_second, permuted_first), _contract(sha="b")
+    )
+
+    assert len({item.id for item in ordered.clause_changes}) == 3
+    assert ordered.model_dump_json() == permuted.model_dump_json()
+
+
+def test_identical_candidate_occurrences_are_unique_and_permutation_stable() -> None:
+    candidates = [
+        _clause(
+            f"candidate-{suffix}",
+            "Article II Payment Terms\nIdentical body.",
+            block_id=f"after-{suffix}",
+        )
+        for suffix in ("a", "b", "c")
+    ]
+    ordered = diff_contracts(_contract(), _contract(*candidates, sha="b"))
+    permuted = diff_contracts(_contract(), _contract(*reversed(candidates), sha="b"))
+
+    assert len({item.id for item in ordered.clause_changes}) == 3
+    assert {item.kind for item in ordered.clause_changes} == {ClauseChangeKind.ADDED}
+    assert ordered.model_dump_json() == permuted.model_dump_json()
+
+
+def test_identical_one_sided_occurrences_with_duplicate_clause_ids_are_unresolved() -> None:
+    first = _clause("duplicate-id", "Article II Payment Terms\nIdentical body.", block_id="first")
+    second = _clause("duplicate-id", "Article II Payment Terms\nIdentical body.", block_id="second")
+
+    facts = diff_contracts(_contract(first, second), _contract(sha="b"))
+
+    assert facts.clause_changes == []
+    assert facts.unresolved_clause_ids == ["duplicate-id", "duplicate-id"]
+
+    symmetric = diff_contracts(_contract(), _contract(first, second, sha="b"))
+
+    assert symmetric.clause_changes == []
+    assert symmetric.unresolved_clause_ids == ["duplicate-id", "duplicate-id"]
+
+
+def test_nonduplicate_unmatched_fact_id_is_unchanged_by_other_semantic_groups() -> None:
+    payment = _clause("payment", "Article II Payment Terms\nRemoved body.")
+    notices = _clause(
+        "notices",
+        "Article III Notices\nRemoved notice.",
+        label="article iii",
+        heading="Notices",
+    )
+
+    alone = diff_contracts(_contract(payment), _contract(sha="b"))
+    with_other = diff_contracts(_contract(payment, notices), _contract(sha="b"))
+
+    payment_with_other = next(
+        item for item in with_other.clause_changes if item.before_clause_id == "payment"
+    )
+    assert alone.clause_changes[0].id == payment_with_other.id
+
+
+def test_duplicate_occurrence_ids_are_stable_across_formats_and_repeats() -> None:
+    def occurrences(prefix: str, *, with_pages: bool) -> list[ContractClause]:
+        return [
+            _clause(
+                f"stable-{suffix}",
+                "Article II Payment Terms\nIdentical body.",
+                block_id=f"{prefix}:{suffix}",
+            ).model_copy(
+                update={
+                    "evidence": [
+                        EvidenceRef(
+                            block_id=f"{prefix}:{suffix}",
+                            page_index=index if with_pages else None,
+                        )
+                    ]
+                }
+            )
+            for index, suffix in enumerate(("a", "b", "c"))
+        ]
+
+    docx_before = _contract(*occurrences("docx", with_pages=False), format="docx")
+    pdf_before = _contract(*occurrences("pdf", with_pages=True), format="pdf")
+    docx_facts = diff_contracts(docx_before, _contract(sha="b", format="docx"))
+    pdf_facts = diff_contracts(pdf_before, _contract(sha="b", format="pdf"))
+
+    assert [item.id for item in docx_facts.clause_changes] == [
+        item.id for item in pdf_facts.clause_changes
+    ]
+    assert (
+        docx_facts.model_dump_json()
+        == diff_contracts(docx_before, _contract(sha="b", format="docx")).model_dump_json()
+    )
+
+
 def test_clause_evidence_order_does_not_change_fact_bytes() -> None:
     first = EvidenceRef(block_id="stable-a", page_index=0)
     second = EvidenceRef(block_id="stable-b", page_index=1)

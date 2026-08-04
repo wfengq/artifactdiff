@@ -75,6 +75,12 @@ def _clause_location(before: ContractClause | None, after: ContractClause | None
     return _canonical([before_identity, after_identity])
 
 
+def _clause_semantic_key(
+    clause: ContractClause,
+) -> tuple[tuple[str, tuple[str, ...], str], str]:
+    return (_identity(clause), clause.fingerprint)
+
+
 def _unique_pairs(
     before: list[int],
     after: list[int],
@@ -137,8 +143,12 @@ def _clause_change(
     kind: ClauseChangeKind,
     before: ContractClause | None,
     after: ContractClause | None,
+    *,
+    occurrence_id: str | None = None,
 ) -> ClauseChange:
     location = _clause_location(before, after)
+    if occurrence_id is not None:
+        location = _canonical([location, ["clause_id", occurrence_id]])
     return ClauseChange(
         id=_fact_id(
             f"clause:{kind.value}",
@@ -253,12 +263,56 @@ def _classify_unmatched(
             before_fingerprint,
         )
     ]
+    unique_before = [index for index in before_indexes if index not in unresolved_before]
+    unique_after = [index for index in after_indexes if index not in unresolved_after]
+
+    def indistinguishable_occurrences(
+        indexes: list[int], clauses: list[ContractClause]
+    ) -> list[int]:
+        id_counts: dict[tuple[tuple[str, tuple[str, ...], str], str], Counter[str]] = defaultdict(
+            Counter
+        )
+        for index in indexes:
+            clause = clauses[index]
+            id_counts[_clause_semantic_key(clause)][clause.id] += 1
+        return [
+            index
+            for index in indexes
+            if id_counts[_clause_semantic_key(clauses[index])][clauses[index].id] > 1
+        ]
+
+    duplicate_before = indistinguishable_occurrences(unique_before, before_clauses)
+    duplicate_after = indistinguishable_occurrences(unique_after, after_clauses)
     return (
-        [index for index in before_indexes if index not in unresolved_before],
-        unresolved_before,
-        [index for index in after_indexes if index not in unresolved_after],
-        unresolved_after,
+        [index for index in unique_before if index not in duplicate_before],
+        [*unresolved_before, *duplicate_before],
+        [index for index in unique_after if index not in duplicate_after],
+        [*unresolved_after, *duplicate_after],
     )
+
+
+def _unmatched_clause_changes(
+    kind: ClauseChangeKind,
+    indexes: list[int],
+    clauses: list[ContractClause],
+) -> list[ClauseChange]:
+    group_counts = Counter(_clause_semantic_key(clauses[index]) for index in indexes)
+    changes: list[ClauseChange] = []
+    for index in sorted(
+        indexes,
+        key=lambda item: (*_clause_semantic_key(clauses[item]), clauses[item].id),
+    ):
+        clause = clauses[index]
+        occurrence_id = clause.id if group_counts[_clause_semantic_key(clause)] > 1 else None
+        changes.append(
+            _clause_change(
+                kind,
+                clause if kind is ClauseChangeKind.REMOVED else None,
+                clause if kind is ClauseChangeKind.ADDED else None,
+                occurrence_id=occurrence_id,
+            )
+        )
+    return changes
 
 
 def _diff_clauses(
@@ -304,12 +358,10 @@ def _diff_clauses(
         candidate.clauses,
     )
     clause_changes.extend(
-        _clause_change(ClauseChangeKind.REMOVED, baseline.clauses[index], None)
-        for index in unique_before
+        _unmatched_clause_changes(ClauseChangeKind.REMOVED, unique_before, baseline.clauses)
     )
     clause_changes.extend(
-        _clause_change(ClauseChangeKind.ADDED, None, candidate.clauses[index])
-        for index in unique_after
+        _unmatched_clause_changes(ClauseChangeKind.ADDED, unique_after, candidate.clauses)
     )
     unresolved_ids = sorted(
         [baseline.clauses[index].id for index in unresolved_before]
