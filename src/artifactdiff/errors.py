@@ -9,6 +9,10 @@ class InputValidationError(ArtifactDiffError):
     """Raised when a provided input is invalid."""
 
 
+class PolicyValidationError(InputValidationError):
+    """Raised when policy input cannot be validated safely."""
+
+
 class UnsupportedFormatError(InputValidationError):
     """Raised when a source file format is unsupported."""
 
@@ -19,4 +23,3 @@ class ResourceLimitError(ArtifactDiffError):
 
 class RenderUnavailableError(ArtifactDiffError):
     """Raised when a requested rendering capability is unavailable."""
-
