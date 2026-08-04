@@ -18,8 +18,11 @@ from pydantic import JsonValue
 
 from artifactdiff.alignment import align_sequences
 from artifactdiff.contract.features import (
+    CONTRACT_VISIBLE_TEXT_METADATA_KEY,
     FeatureInspectionError,
     inspect_docx_features,
+    legacy_ooxml_paragraph_text,
+    legacy_ooxml_table_text,
     visible_ooxml_paragraph_text,
     visible_ooxml_table_text,
 )
@@ -117,11 +120,13 @@ class DocxAdapter:
         ) as error:
             raise InputValidationError(f"invalid DOCX: {path}") from error
         blocks: list[ContentBlock] = []
+        visible_text_by_block: dict[str, str] = {}
         for item in iter_body_items(document):
             block = self._body_block(item, len(blocks))
             if block is not None:
                 blocks.append(block)
-        self._append_section_blocks(document, blocks)
+                visible_text_by_block[block.id] = self._body_visible_text(item)
+        self._append_section_blocks(document, blocks, visible_text_by_block)
         try:
             features = inspect_docx_features(path)
         except FeatureInspectionError as error:
@@ -149,7 +154,19 @@ class DocxAdapter:
                         warnings.append(f"DOCX visual rendering unavailable: {error}")
                     else:
                         pages = rendered.pages
-                        if _link_rendered_evidence(blocks, rendered.blocks):
+                        visible_blocks = [
+                            block.model_copy(
+                                update={
+                                    "text": visible_text,
+                                    "normalized_text": normalize_text(visible_text),
+                                }
+                            )
+                            for block in blocks
+                            if normalize_text(
+                                visible_text := visible_text_by_block.get(block.id, block.text)
+                            )
+                        ]
+                        if _link_rendered_evidence(visible_blocks, rendered.blocks):
                             warnings.append(RENDERED_EVIDENCE_WARNING)
         return DocumentSnapshot.from_path(
             path,
@@ -157,12 +174,19 @@ class DocxAdapter:
             blocks=blocks,
             warnings=warnings,
             metadata={
-                "document_features": [feature.model_dump(mode="json") for feature in features]
+                CONTRACT_VISIBLE_TEXT_METADATA_KEY: {
+                    block_id: text for block_id, text in visible_text_by_block.items()
+                },
+                "document_features": [feature.model_dump(mode="json") for feature in features],
             },
         )
 
     @staticmethod
-    def _append_section_blocks(document: DocumentType, blocks: list[ContentBlock]) -> None:
+    def _append_section_blocks(
+        document: DocumentType,
+        blocks: list[ContentBlock],
+        visible_text_by_block: dict[str, str],
+    ) -> None:
         for content_type, part_name in (
             (ContentType.HEADER, "header"),
             (ContentType.FOOTER, "footer"),
@@ -171,28 +195,32 @@ class DocxAdapter:
             for section in document.sections:
                 part = getattr(section, part_name)
                 text = "\n".join(
-                    visible_ooxml_paragraph_text(paragraph._p).strip()
+                    legacy_ooxml_paragraph_text(paragraph._p).strip()
                     for paragraph in part.paragraphs
-                    if visible_ooxml_paragraph_text(paragraph._p).strip()
+                    if legacy_ooxml_paragraph_text(paragraph._p).strip()
                 )
                 if not text or text in seen:
                     continue
                 seen.add(text)
                 ordinal = len(blocks)
-                blocks.append(
-                    ContentBlock(
-                        id=f"docx:{ordinal}:{content_type}:{fingerprint(text)}",
-                        ordinal=ordinal,
-                        content_type=content_type,
-                        text=text,
-                        normalized_text=normalize_text(text),
-                    )
+                block = ContentBlock(
+                    id=f"docx:{ordinal}:{content_type}:{fingerprint(text)}",
+                    ordinal=ordinal,
+                    content_type=content_type,
+                    text=text,
+                    normalized_text=normalize_text(text),
+                )
+                blocks.append(block)
+                visible_text_by_block[block.id] = "\n".join(
+                    visible_ooxml_paragraph_text(paragraph._p).strip()
+                    for paragraph in part.paragraphs
+                    if visible_ooxml_paragraph_text(paragraph._p).strip()
                 )
 
     @staticmethod
     def _body_block(item: Paragraph | Table, ordinal: int) -> ContentBlock | None:
         if isinstance(item, Paragraph):
-            text = visible_ooxml_paragraph_text(item._p).strip()
+            text = legacy_ooxml_paragraph_text(item._p).strip()
             if not text:
                 return None
             style_name = item.style.name if item.style is not None else ""
@@ -216,7 +244,7 @@ class DocxAdapter:
                     }
                     break
         else:
-            text = visible_ooxml_table_text(item._tbl)
+            text = legacy_ooxml_table_text(item._tbl)
             if not text.strip():
                 return None
             content_type = ContentType.TABLE
@@ -230,3 +258,9 @@ class DocxAdapter:
             normalized_text=normalize_text(text),
             metadata=metadata,
         )
+
+    @staticmethod
+    def _body_visible_text(item: Paragraph | Table) -> str:
+        if isinstance(item, Paragraph):
+            return visible_ooxml_paragraph_text(item._p).strip()
+        return visible_ooxml_table_text(item._tbl)

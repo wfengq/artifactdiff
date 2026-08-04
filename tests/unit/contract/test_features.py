@@ -6,14 +6,21 @@ from io import BytesIO
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
+import pytest
 from docx import Document
 from docx.shared import Inches
 from lxml import etree
 from PIL import Image
 
 from artifactdiff.contract.analyzer import analyze_contract
-from artifactdiff.contract.features import inspect_docx_features
+from artifactdiff.contract.features import (
+    CONTRACT_VISIBLE_TEXT_METADATA_KEY,
+    FeatureInspectionError,
+    inspect_docx_features,
+    ooxml_on_off_enabled,
+)
 from artifactdiff.formats.docx import DocxAdapter
+from artifactdiff.normalize import fingerprint
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -221,7 +228,11 @@ def test_hidden_text_in_table_is_reported_only_as_a_bounded_feature(tmp_path: Pa
     snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
     contract = analyze_contract(snapshot)
 
-    assert snapshot.blocks[0].text.strip() == "Visible term"
+    assert snapshot.blocks[0].text.strip() == "Visible term Secret table term"
+    assert (
+        snapshot.metadata[CONTRACT_VISIBLE_TEXT_METADATA_KEY][snapshot.blocks[0].id].strip()
+        == "Visible term"
+    )
     assert any(item.kind.value == "hidden_text" for item in contract.features)
     assert "Secret table term" not in contract.model_dump_json()
 
@@ -243,7 +254,12 @@ def test_docx_image_after_hidden_only_table_uses_actual_signature_block_evidence
     contract = analyze_contract(snapshot)
     image = next(item for item in contract.features if item.kind.value == "embedded_image")
 
-    assert [block.id for block in snapshot.blocks] == [image.evidence[0].block_id]
+    assert snapshot.blocks[-1].id == image.evidence[0].block_id
+    assert (
+        snapshot.metadata[CONTRACT_VISIBLE_TEXT_METADATA_KEY][snapshot.blocks[0].id]
+        == ""
+    )
+    assert "Hidden-only table" not in contract.model_dump_json()
     assert contract.protected_regions[0].feature_fingerprints == [image.fingerprint]
 
 
@@ -273,3 +289,100 @@ def test_docx_feature_inspection_ignores_unrelated_malformed_custom_xml(tmp_path
     actual = [item.model_dump(mode="json") for item in inspect_docx_features(source)]
 
     assert actual == expected
+
+
+def test_docx_on_off_visibility_keeps_false_values_and_bounds_true_hidden_text(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "on-off.docx"
+    document = Document()
+    document.add_heading("Section 1 Terms", level=1)
+    paragraph = document.add_paragraph("Body ")
+    visible_run = paragraph.add_run("Term A")
+    visible_run.font.hidden = False
+    hidden_run = paragraph.add_run(" Secret body")
+    hidden_run.font.hidden = True
+    cell = document.add_table(rows=1, cols=1).cell(0, 0)
+    cell.add_paragraph("Table ")
+    visible_table = cell.paragraphs[-1].add_run("Term A")
+    visible_table.font.hidden = False
+    hidden_table = cell.paragraphs[-1].add_run(" Secret table")
+    hidden_table.font.hidden = True
+    header = document.sections[0].header.paragraphs[0]
+    visible_header = header.add_run("Header Term A")
+    visible_header.font.hidden = False
+    hidden_header = header.add_run(" Secret header")
+    hidden_header.font.hidden = True
+    footer = document.sections[0].footer.paragraphs[0]
+    visible_footer = footer.add_run("Footer Term A")
+    visible_footer.font.hidden = False
+    hidden_footer = footer.add_run(" Secret footer")
+    hidden_footer.font.hidden = True
+    document.save(source)
+
+    snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
+    contract = analyze_contract(snapshot)
+    serialized = contract.model_dump_json()
+
+    assert "Term A" in "\n".join(clause.text for clause in contract.clauses)
+    assert "Secret body" not in serialized
+    assert "Secret table" not in serialized
+    assert "Secret header" not in serialized
+    assert "Secret footer" not in serialized
+    hidden_fingerprints = {
+        item.fingerprint for item in contract.features if item.kind.value == "hidden_text"
+    }
+    assert hidden_fingerprints == {
+        fingerprint("Secret body"),
+        fingerprint("Secret table"),
+        fingerprint("Secret header"),
+        fingerprint("Secret footer"),
+    }
+    margin_fingerprints = {
+        item.kind.value: item.text_fingerprint for item in contract.protected_regions
+    }
+    assert margin_fingerprints["header"] == fingerprint("Header Term A")
+    assert margin_fingerprints["footer"] == fingerprint("Footer Term A")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, True),
+        ("1", True),
+        ("true", True),
+        ("on", True),
+        ("0", False),
+        ("false", False),
+        ("off", False),
+        (" FALSE ", False),
+    ],
+)
+def test_ooxml_on_off_visibility_uses_standard_lexical_values(
+    value: str | None, expected: bool
+) -> None:
+    element = etree.Element(f"{{{W}}}vanish")
+    if value is not None:
+        element.set(f"{{{W}}}val", value)
+
+    assert ooxml_on_off_enabled(element) is expected
+
+
+def test_docx_feature_inspection_bounds_malformed_external_target(tmp_path: Path) -> None:
+    from docx.opc.constants import RELATIONSHIP_TYPE
+
+    malformed_target = "http://["
+    source = tmp_path / "malformed-link.docx"
+    document = Document()
+    document.add_paragraph("Terms")
+    document.part.relate_to(
+        malformed_target,
+        RELATIONSHIP_TYPE.HYPERLINK,
+        is_external=True,
+    )
+    document.save(source)
+
+    with pytest.raises(FeatureInspectionError) as error:
+        inspect_docx_features(source)
+
+    assert malformed_target not in str(error.value)

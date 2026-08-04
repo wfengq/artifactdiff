@@ -55,6 +55,8 @@ _NON_BUSINESS_METADATA = frozenset(
     }
 )
 _PDF_VOLATILE_METADATA = frozenset({"filename", "filepath", "source"})
+CONTRACT_VISIBLE_TEXT_METADATA_KEY = "contract_visible_text_by_block"
+_OOXML_FALSE_VALUES = frozenset({"0", "false", "off"})
 
 
 class FeatureInspectionError(ValueError):
@@ -152,20 +154,31 @@ def _relationship_target(owner: str, target: str) -> str:
     return "/".join(parts)
 
 
-def visible_ooxml_paragraph_text(paragraph: Any) -> str:
-    """Return paragraph text excluding revisions and hidden runs."""
+def ooxml_on_off_enabled(element: Any) -> bool:
+    """Interpret one OOXML on/off element using ECMA-376 lexical values."""
+    value = element.get(f"{{{W}}}val")
+    return value is None or normalize_text(str(value)) not in _OOXML_FALSE_VALUES
+
+
+def _ooxml_run_is_hidden(run: Any) -> bool:
+    properties = run.find(f"{{{W}}}rPr")
+    if properties is None:
+        return False
+    return any(
+        element is not None and ooxml_on_off_enabled(element)
+        for kind in ("vanish", "webHidden")
+        if (element := properties.find(f"{{{W}}}{kind}")) is not None
+    )
+
+
+def _ooxml_paragraph_text(paragraph: Any, *, include_hidden: bool) -> str:
     pieces: list[str] = []
 
     def visit(node: Any) -> None:
         if node.tag in {_W_INS, _W_DEL}:
             return
-        if node.tag == _W_R:
-            properties = node.find(f"{{{W}}}rPr")
-            if properties is not None and any(
-                properties.find(f"{{{W}}}{kind}") is not None
-                for kind in ("vanish", "webHidden")
-            ):
-                return
+        if node.tag == _W_R and not include_hidden and _ooxml_run_is_hidden(node):
+            return
         if node.tag == _W_T and node.text:
             pieces.append(node.text)
         elif node.tag == _W_TAB:
@@ -179,16 +192,40 @@ def visible_ooxml_paragraph_text(paragraph: Any) -> str:
     return "".join(pieces)
 
 
-def visible_ooxml_table_text(table: Any) -> str:
-    """Return table text using the same row/cell/paragraph shape as the DOCX adapter."""
+def legacy_ooxml_paragraph_text(paragraph: Any) -> str:
+    """Return python-docx-compatible paragraph text, including hidden runs."""
+    return _ooxml_paragraph_text(paragraph, include_hidden=True)
+
+
+def visible_ooxml_paragraph_text(paragraph: Any) -> str:
+    """Return contract-visible paragraph text, excluding genuinely hidden runs."""
+    return _ooxml_paragraph_text(paragraph, include_hidden=False)
+
+
+def _ooxml_table_text(table: Any, *, include_hidden: bool) -> str:
     rows: list[str] = []
     for row in table.findall(f"./{{{W}}}tr"):
         cells: list[str] = []
         for cell in row.findall(f"./{{{W}}}tc"):
             paragraphs = cell.findall(f"./{{{W}}}p")
-            cells.append("\n".join(visible_ooxml_paragraph_text(item) for item in paragraphs))
+            cells.append(
+                "\n".join(
+                    _ooxml_paragraph_text(item, include_hidden=include_hidden)
+                    for item in paragraphs
+                )
+            )
         rows.append("\t".join(cells))
     return "\n".join(rows)
+
+
+def legacy_ooxml_table_text(table: Any) -> str:
+    """Return python-docx-compatible table text, including hidden runs."""
+    return _ooxml_table_text(table, include_hidden=True)
+
+
+def visible_ooxml_table_text(table: Any) -> str:
+    """Return contract-visible table text, excluding genuinely hidden runs."""
+    return _ooxml_table_text(table, include_hidden=False)
 
 
 def _document_evidence(root: ElementTree.Element) -> dict[int, EvidenceRef]:
@@ -199,7 +236,7 @@ def _document_evidence(root: ElementTree.Element) -> dict[int, EvidenceRef]:
     ordinal = 0
     for child in body:
         if child.tag == _W_P:
-            text = visible_ooxml_paragraph_text(child).strip()
+            text = legacy_ooxml_paragraph_text(child).strip()
             if not text:
                 continue
             style = child.find(f"./{{{W}}}pPr/{{{W}}}pStyle")
@@ -213,7 +250,7 @@ def _document_evidence(root: ElementTree.Element) -> dict[int, EvidenceRef]:
                 descendant_evidence[id(descendant)] = evidence
             ordinal += 1
         elif child.tag == f"{{{W}}}tbl":
-            text = visible_ooxml_table_text(child)
+            text = legacy_ooxml_table_text(child)
             if not text.strip():
                 continue
             evidence = EvidenceRef(
@@ -251,9 +288,13 @@ def _metadata_features(roots: Mapping[str, ElementTree.Element]) -> list[Documen
 
 def _sanitized_uri(target: str) -> tuple[str, str, str]:
     normalized_target = normalize_text(target)
-    split = urlsplit(normalized_target)
-    scheme = split.scheme.casefold()
-    host_hash = _sha256((split.hostname or "").casefold().encode("utf-8"))
+    try:
+        split = urlsplit(normalized_target)
+        scheme = split.scheme.casefold()
+        hostname = split.hostname or ""
+    except (TypeError, ValueError) as error:
+        raise FeatureInspectionError("malformed external relationship target") from error
+    host_hash = _sha256(hostname.casefold().encode("utf-8"))
     return scheme, host_hash, _sha256(normalized_target.encode("utf-8"))
 
 
@@ -359,7 +400,8 @@ def inspect_docx_features(path: Path) -> list[DocumentFeature]:
                 hidden_kinds = [
                     kind
                     for kind in ("vanish", "webHidden")
-                    if properties.find(f"{{{W}}}{kind}") is not None
+                    if (element := properties.find(f"{{{W}}}{kind}")) is not None
+                    and ooxml_on_off_enabled(element)
                 ]
                 if hidden_kinds:
                     hidden_text = " ".join(item.text or "" for item in node.iter(_W_T))

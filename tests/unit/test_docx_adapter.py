@@ -4,6 +4,7 @@ import pytest
 from docx import Document
 
 import artifactdiff.formats.docx as docx_module
+from artifactdiff.contract.features import CONTRACT_VISIBLE_TEXT_METADATA_KEY
 from artifactdiff.errors import InputValidationError, RenderUnavailableError
 from artifactdiff.formats.docx import DocxAdapter
 from artifactdiff.models import (
@@ -132,7 +133,7 @@ def test_docx_adapter_appends_unique_non_empty_headers_and_footers(tmp_path: Pat
     assert [block.ordinal for block in snapshot.blocks] == [0, 1, 2]
 
 
-def test_docx_adapter_keeps_hidden_header_and_footer_text_out_of_semantic_blocks(
+def test_docx_adapter_keeps_hidden_section_text_out_of_contract_visible_metadata(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "hidden-sections.docx"
@@ -150,10 +151,15 @@ def test_docx_adapter_keeps_hidden_header_and_footer_text_out_of_semantic_blocks
 
     snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
 
-    assert [block.text for block in snapshot.blocks] == ["Body text", "Visible header"]
-    serialized = snapshot.model_dump_json()
-    assert "Private header note" not in serialized
-    assert "Private footer note" not in serialized
+    assert [block.text for block in snapshot.blocks] == [
+        "Body text",
+        "Visible header Private header note",
+        "Private footer note",
+    ]
+    visible_text = snapshot.metadata[CONTRACT_VISIBLE_TEXT_METADATA_KEY]
+    assert list(visible_text.values()) == ["Body text", "Visible header", ""]
+    assert "Private header note" not in str(visible_text)
+    assert "Private footer note" not in str(visible_text)
     hidden_parts = {
         item["details"]["part_name"]
         for item in snapshot.metadata["document_features"]
@@ -161,6 +167,66 @@ def test_docx_adapter_keeps_hidden_header_and_footer_text_out_of_semantic_blocks
     }
     assert any(part.startswith("word/header") for part in hidden_parts)
     assert any(part.startswith("word/footer") for part in hidden_parts)
+
+
+def test_docx_adapter_preserves_legacy_hidden_text_in_all_logical_block_shapes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "legacy-hidden.docx"
+    document = Document()
+    paragraph = document.add_paragraph("Body ")
+    body_false = paragraph.add_run("Term A")
+    body_false.font.hidden = False
+    body_true = paragraph.add_run(" Secret body")
+    body_true.font.hidden = True
+    cell = document.add_table(rows=1, cols=1).cell(0, 0)
+    cell.text = "Table "
+    table_false = cell.paragraphs[0].add_run("Term A")
+    table_false.font.hidden = False
+    table_true = cell.paragraphs[0].add_run(" Secret table")
+    table_true.font.hidden = True
+    header = document.sections[0].header.paragraphs[0]
+    header_false = header.add_run("Header Term A")
+    header_false.font.hidden = False
+    header_true = header.add_run(" Secret header")
+    header_true.font.hidden = True
+    footer = document.sections[0].footer.paragraphs[0]
+    footer_false = footer.add_run("Footer Term A")
+    footer_false.font.hidden = False
+    footer_true = footer.add_run(" Secret footer")
+    footer_true.font.hidden = True
+    document.save(source)
+
+    snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
+
+    assert [block.text for block in snapshot.blocks] == [
+        "Body Term A Secret body",
+        "Table Term A Secret table",
+        "Header Term A Secret header",
+        "Footer Term A Secret footer",
+    ]
+
+
+def test_docx_adapter_translates_malformed_external_target_without_disclosure(
+    tmp_path: Path,
+) -> None:
+    from docx.opc.constants import RELATIONSHIP_TYPE
+
+    malformed_target = "http://["
+    source = tmp_path / "malformed-link.docx"
+    document = Document()
+    document.add_paragraph("Terms")
+    document.part.relate_to(
+        malformed_target,
+        RELATIONSHIP_TYPE.HYPERLINK,
+        is_external=True,
+    )
+    document.save(source)
+
+    with pytest.raises(InputValidationError) as error:
+        DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
+
+    assert malformed_target not in str(error.value)
 
 
 def test_docx_adapter_rejects_corrupt_docx_with_domain_error(tmp_path: Path) -> None:

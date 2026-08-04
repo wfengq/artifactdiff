@@ -7,6 +7,7 @@ from math import isfinite
 from pydantic import ValidationError
 
 from artifactdiff.contract.entities import extract_entities
+from artifactdiff.contract.features import CONTRACT_VISIBLE_TEXT_METADATA_KEY
 from artifactdiff.contract.language import detect_language
 from artifactdiff.contract.models import (
     ClauseLabel,
@@ -174,8 +175,27 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
     if not isinstance(raw_features, list):
         raise TypeError("document_features metadata must be a list")
     features = [DocumentFeature.model_validate(item) for item in raw_features]
-
+    raw_visible_text = snapshot.metadata.get(CONTRACT_VISIBLE_TEXT_METADATA_KEY)
+    if raw_visible_text is not None and not isinstance(raw_visible_text, dict):
+        raise TypeError(f"{CONTRACT_VISIBLE_TEXT_METADATA_KEY} metadata must be an object")
+    visible_text_by_block = raw_visible_text or {}
+    contract_blocks: list[ContentBlock] = []
     for block in snapshot.blocks:
+        visible_text = visible_text_by_block.get(block.id, block.text)
+        if not isinstance(visible_text, str):
+            raise TypeError(f"{CONTRACT_VISIBLE_TEXT_METADATA_KEY} values must be strings")
+        if not normalize_text(visible_text):
+            continue
+        contract_blocks.append(
+            block.model_copy(
+                update={
+                    "text": visible_text,
+                    "normalized_text": normalize_text(visible_text),
+                }
+            )
+        )
+
+    for block in contract_blocks:
         region_kind = _region_kind(block)
         if region_kind is not None:
             protected_regions.append(_protected_region(block, region_kind, features))
@@ -264,7 +284,7 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
     )
     return ContractDocument(
         source=source,
-        language=detect_language("\n".join(block.text for block in snapshot.blocks)),
+        language=detect_language("\n".join(block.text for block in contract_blocks)),
         clauses=clauses,
         tables=tables,
         protected_regions=protected_regions,
