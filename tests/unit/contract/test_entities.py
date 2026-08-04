@@ -1,0 +1,53 @@
+import pytest
+
+from artifactdiff.contract.entities import extract_entities
+from artifactdiff.contract.models import EvidenceRef
+
+
+@pytest.fixture
+def evidence() -> EvidenceRef:
+    return EvidenceRef(block_id="block-1", page_index=0)
+
+
+def test_extract_entities_normalizes_contract_values(evidence: EvidenceRef) -> None:
+    entities = extract_entities(
+        "\u7532\u65b9\uff1a\u4e0a\u6d77\u793a\u4f8b\u79d1\u6280\u6709\u9650\u516c\u53f8\uff1b\u4ef7\u6b3e RMB 10,000.00\uff1b45 \u5929\uff1b\u5229\u7387 3.5%\uff1b2026\u5e748\u67084\u65e5",
+        "clause-4",
+        evidence,
+    )
+
+    observed = {(item.kind.value, item.normalized_value) for item in entities}
+
+    assert ("party", "\u4e0a\u6d77\u793a\u4f8b\u79d1\u6280\u6709\u9650\u516c\u53f8") in observed
+    assert ("money", "10000.00") in observed
+    assert ("currency", "CNY") in observed
+    assert ("duration", "45 day") in observed
+    assert ("percentage", "3.5") in observed
+    assert ("date", "2026-08-04") in observed
+
+
+def test_extract_entities_has_stable_source_order_and_ids(evidence: EvidenceRef) -> None:
+    entities = extract_entities("Party A: Acme Ltd; USD 2,000; 15 days", "clause-1", evidence)
+
+    assert [entity.kind.value for entity in entities] == ["party", "currency", "money", "duration"]
+    assert [entity.id for entity in entities] == [
+        "entity-02a5f660c1bbb4f0ccb84075",
+        "entity-7b48c42120058ae6a2018c9c",
+        "entity-9bcadedfebb33f600d41967e",
+        "entity-01f827a86553663e7d1c12ea",
+    ]
+    assert all(entity.evidence == [evidence] for entity in entities)
+
+
+def test_extract_entities_does_not_match_currency_code_inside_word(evidence: EvidenceRef) -> None:
+    entities = extract_entities("CNYx is not a currency amount.", None, evidence)
+
+    assert entities == []
+
+
+def test_extract_entities_requires_bounded_currency_codes_for_money(
+    evidence: EvidenceRef,
+) -> None:
+    entities = extract_entities("XRMB 100 and 100 CNYx", None, evidence)
+
+    assert entities == []
