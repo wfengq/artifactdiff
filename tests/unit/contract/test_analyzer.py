@@ -83,3 +83,51 @@ def test_analyzer_preserves_tables_and_classifies_anchored_protected_regions() -
         ProtectedRegionKind.FOOTER,
         ProtectedRegionKind.ATTACHMENT,
     ]
+
+
+def test_analyzer_disambiguates_duplicate_base_ids_using_full_clause_text() -> None:
+    long_prefix = "x" * 180
+    blocks = [
+        ContentBlock(
+            id="heading-1",
+            ordinal=0,
+            content_type=ContentType.HEADING,
+            text="Section 1 Shared heading",
+            normalized_text="section 1 shared heading",
+        ),
+        ContentBlock(
+            id="body-1",
+            ordinal=1,
+            content_type=ContentType.PARAGRAPH,
+            text=f"{long_prefix} first ending RMB 100",
+            normalized_text=normalize_text(f"{long_prefix} first ending RMB 100"),
+        ),
+        ContentBlock(
+            id="heading-2",
+            ordinal=2,
+            content_type=ContentType.HEADING,
+            text="Section 1 Shared heading",
+            normalized_text="section 1 shared heading",
+        ),
+        ContentBlock(
+            id="body-2",
+            ordinal=3,
+            content_type=ContentType.PARAGRAPH,
+            text=f"{long_prefix} second ending RMB 200",
+            normalized_text=normalize_text(f"{long_prefix} second ending RMB 200"),
+        ),
+    ]
+    snapshot = DocumentSnapshot(
+        source_path="contract.docx", format="docx", sha256="c" * 64, size_bytes=3, blocks=blocks
+    )
+
+    first = analyze_contract(snapshot)
+    second = analyze_contract(snapshot)
+
+    assert len({clause.id for clause in first.clauses}) == 2
+    assert [clause.id for clause in second.clauses] == [clause.id for clause in first.clauses]
+    assert all(
+        entity.clause_id == clause.id
+        for clause in first.clauses
+        for entity in clause.entities
+    )

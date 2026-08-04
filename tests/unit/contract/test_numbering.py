@@ -1,6 +1,8 @@
 import pytest
+from pydantic import ValidationError
 
-from artifactdiff.contract.numbering import parse_clause_marker
+from artifactdiff.contract.models import ClauseLabel
+from artifactdiff.contract.numbering import ClauseMarker, parse_clause_marker
 
 
 @pytest.mark.parametrize(
@@ -30,3 +32,13 @@ def test_parse_clause_marker(
 
 def test_parse_clause_marker_requires_marker_at_start_of_line() -> None:
     assert parse_clause_marker("Payment terms: Section 4.2") is None
+
+
+def test_clause_marker_rejects_unknown_fields() -> None:
+    with pytest.raises(ValidationError):
+        ClauseMarker(
+            level=1,
+            label=ClauseLabel(printed="Section 1", normalized="section 1", scheme="section"),
+            heading="Terms",
+            unexpected=True,
+        )

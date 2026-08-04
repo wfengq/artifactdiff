@@ -2,15 +2,14 @@
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
 from re import Match, Pattern
 
 from artifactdiff.contract.models import ClauseLabel
+from artifactdiff.models import StrictModel
 from artifactdiff.normalize import normalize_text
 
 
-@dataclass(frozen=True)
-class ClauseMarker:
+class ClauseMarker(StrictModel):
     """A parsed clause label, its nesting level, and the following heading."""
 
     level: int

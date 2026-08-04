@@ -49,6 +49,24 @@ def _clause_id(draft: _ClauseDraft) -> str:
     return f"clause-{hashlib.sha256(material).hexdigest()[:24]}"
 
 
+def _clause_ids(drafts: list[_ClauseDraft]) -> list[str]:
+    base_ids = [_clause_id(draft) for draft in drafts]
+    base_counts = {base_id: base_ids.count(base_id) for base_id in base_ids}
+    duplicate_occurrences: dict[tuple[str, str], int] = {}
+    ids: list[str] = []
+    for base_id, draft in zip(base_ids, drafts, strict=True):
+        if base_counts[base_id] == 1:
+            ids.append(base_id)
+            continue
+        full_text = fingerprint("\n".join(block.text for block in draft.blocks))
+        occurrence_key = (base_id, full_text)
+        occurrence = duplicate_occurrences.get(occurrence_key, 0)
+        duplicate_occurrences[occurrence_key] = occurrence + 1
+        material = f"{base_id}\0{full_text}\0{occurrence}".encode("utf-8")
+        ids.append(f"clause-{hashlib.sha256(material).hexdigest()[:24]}")
+    return ids
+
+
 def _region_kind(block: ContentBlock) -> ProtectedRegionKind | None:
     if block.content_type is ContentType.HEADER:
         return ProtectedRegionKind.HEADER
@@ -141,7 +159,7 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
             )
             active_index = len(drafts) - 1
 
-    ids = [_clause_id(draft) for draft in drafts]
+    ids = _clause_ids(drafts)
     clauses: list[ContractClause] = []
     all_entities = []
     for index, draft in enumerate(drafts):
