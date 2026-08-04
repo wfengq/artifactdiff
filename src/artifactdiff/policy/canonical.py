@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TypeAlias
 
+from pydantic import ValidationError
+
 from artifactdiff.errors import PolicyValidationError
 from artifactdiff.policy.models import ContractPolicy
 
@@ -54,7 +56,11 @@ def _normalize(value: object) -> CanonicalValue:
 
 
 def _canonical_payload(policy: ContractPolicy) -> dict[str, CanonicalValue]:
-    normalized = _normalize(policy.model_dump(mode="python"))
+    try:
+        validated = ContractPolicy.model_validate(policy)
+    except (ValidationError, RecursionError):
+        raise PolicyValidationError("policy cannot be canonicalized") from None
+    normalized = _normalize(validated.model_dump(mode="python"))
     if not isinstance(normalized, dict):
         raise PolicyValidationError("policy cannot be canonicalized")
     return normalized

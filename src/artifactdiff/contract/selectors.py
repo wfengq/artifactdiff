@@ -6,7 +6,7 @@ from enum import StrEnum
 from math import fsum
 from typing import Literal
 
-from pydantic import Field, StrictInt, StrictStr, field_validator
+from pydantic import ConfigDict, Field, StrictInt, StrictStr, field_validator
 
 from artifactdiff.contract.models import ContractClause, ContractDocument
 from artifactdiff.models import StrictModel
@@ -25,6 +25,8 @@ STABLE_VALUE_PATTERN = re.compile(r"\d+(?:[.,]\d+)*")
 
 
 class ClauseSelector(StrictModel):
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
     clause_label: StrictStr
     heading: StrictStr
     ancestor_path: tuple[StrictStr, ...] = ()

@@ -41,6 +41,23 @@ def _expected_rule(rule_id: str = "payment-window") -> ExpectedRule:
     )
 
 
+def _allow_rule() -> AllowRule:
+    return AllowRule(selector=_selector(), kinds={"modified"})
+
+
+def _unsafe_selector(source: str) -> ClauseSelector:
+    selector = _selector()
+    if source == "mutated":
+        selector.ancestor_path = {"Agreement", "Schedule"}
+        return selector
+    return ClauseSelector.model_construct(
+        **{
+            **selector.model_dump(mode="python"),
+            "ancestor_path": {"Agreement", "Schedule"},
+        }
+    )
+
+
 def test_policy_defaults_to_contract_safe_minimal_and_all_protected() -> None:
     policy = ContractPolicy(baseline=PolicyBaseline(sha256="a" * 64, format="docx"))
 
@@ -277,6 +294,87 @@ def test_policy_rejects_duplicate_expected_rule_ids() -> None:
             baseline=PolicyBaseline(sha256="a" * 64, format="pdf"),
             expect=[_expected_rule(), _expected_rule()],
         )
+
+
+def test_policy_rules_accept_valid_prebuilt_selectors() -> None:
+    selector = _selector()
+
+    expected = ExpectedRule(
+        id="payment-window",
+        selector=selector,
+        operation=ExactReplace(before="30 days", after="45 days"),
+    )
+    allowed = AllowRule(selector=selector, kinds={"modified"})
+
+    assert expected.selector == selector
+    assert allowed.selector == selector
+
+
+@pytest.mark.parametrize("source", ["mutated", "model_construct"])
+@pytest.mark.parametrize("rule_kind", ["expected", "allow"])
+def test_policy_rules_revalidate_prebuilt_selectors(source: str, rule_kind: str) -> None:
+    selector = _unsafe_selector(source)
+
+    with pytest.raises(ValidationError):
+        if rule_kind == "expected":
+            ExpectedRule(
+                id="payment-window",
+                selector=selector,
+                operation=ExactReplace(before="30 days", after="45 days"),
+            )
+        else:
+            AllowRule(selector=selector, kinds={"modified"})
+
+
+def test_policy_accepts_valid_prebuilt_rules() -> None:
+    expected = _expected_rule()
+    allowed = _allow_rule()
+
+    policy = ContractPolicy(
+        baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+        expect=[expected],
+        allow=[allowed],
+    )
+
+    assert policy.expect == [expected]
+    assert policy.allow == [allowed]
+
+
+@pytest.mark.parametrize("source", ["mutated", "model_construct"])
+@pytest.mark.parametrize("rule_kind", ["expected", "allow"])
+def test_contract_policy_revalidates_prebuilt_rules(source: str, rule_kind: str) -> None:
+    if rule_kind == "expected":
+        rule: object = _expected_rule()
+        if source == "mutated":
+            rule.id = "Invalid_ID"
+        else:
+            rule = ExpectedRule.model_construct(
+                id="Invalid_ID",
+                selector=_selector(),
+                operation=ExactReplace(before="30 days", after="45 days"),
+            )
+        values = {"expect": [rule]}
+    else:
+        rule = _allow_rule()
+        if source == "mutated":
+            rule.kinds = frozenset()
+        else:
+            rule = AllowRule.model_construct(selector=_selector(), kinds=frozenset())
+        values = {"allow": [rule]}
+
+    with pytest.raises(ValidationError):
+        ContractPolicy(
+            baseline=PolicyBaseline(sha256="a" * 64, format="docx"),
+            **values,
+        )
+
+
+def test_frozen_policy_revalidates_a_prebuilt_mutated_policy() -> None:
+    policy = ContractPolicy(baseline=PolicyBaseline(sha256="a" * 64, format="docx"))
+    policy.baseline.sha256 = "invalid"
+
+    with pytest.raises(ValidationError):
+        FrozenPolicy(policy=policy, canonical_sha256="b" * 64)
 
 
 @pytest.mark.parametrize(

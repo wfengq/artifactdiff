@@ -4,6 +4,7 @@ from enum import StrEnum
 from typing import Annotated, Literal
 
 from pydantic import (
+    ConfigDict,
     Field,
     StrictBool,
     StrictInt,
@@ -34,13 +35,19 @@ def _require_text_collection(value: object) -> object:
     return value
 
 
+class PolicyModel(StrictModel):
+    """Policy base that revalidates prebuilt nested model instances."""
+
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
+
 class EvidenceMode(StrEnum):
     MINIMAL = "minimal"
     FULL = "full"
     SEALED = "sealed"
 
 
-class ExactReplace(StrictModel):
+class ExactReplace(PolicyModel):
     type: Literal["exact_replace"] = "exact_replace"
     before: StrictStr = Field(min_length=1, max_length=10_000)
     after: StrictStr = Field(min_length=1, max_length=10_000)
@@ -49,13 +56,13 @@ class ExactReplace(StrictModel):
     _type_is_text = field_validator("type", mode="before")(_require_text)
 
 
-class ExpectedRule(StrictModel):
+class ExpectedRule(PolicyModel):
     id: StrictStr = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
     selector: ClauseSelector
     operation: ExactReplace
 
 
-class AllowRule(StrictModel):
+class AllowRule(PolicyModel):
     selector: ClauseSelector
     kinds: frozenset[AllowKind] = Field(min_length=1)
 
@@ -76,7 +83,7 @@ class ProtectedTarget(StrEnum):
     ATTACHMENTS = "attachments"
 
 
-class VisualPolicy(StrictModel):
+class VisualPolicy(PolicyModel):
     explained_regions: Literal["pass"] = "pass"
     pagination_reflow: Literal["review", "fail"] = "review"
     protected_region_change: Literal["fail"] = "fail"
@@ -100,33 +107,33 @@ class VisualPolicy(StrictModel):
         return value
 
 
-class EvidencePolicy(StrictModel):
+class EvidencePolicy(PolicyModel):
     mode: EvidenceMode = EvidenceMode.MINIMAL
 
     _mode_is_text = field_validator("mode", mode="before")(_require_text)
 
 
-class MetadataPolicy(StrictModel):
+class MetadataPolicy(PolicyModel):
     non_business_change: Literal["review", "ignore"] = "review"
 
     _outcome_is_text = field_validator("non_business_change", mode="before")(_require_text)
 
 
-class PolicyBaseline(StrictModel):
+class PolicyBaseline(PolicyModel):
     sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     format: Literal["pdf", "docx"]
 
     _format_is_text = field_validator("format", mode="before")(_require_text)
 
 
-class PolicyPluginRequirement(StrictModel):
+class PolicyPluginRequirement(PolicyModel):
     version: StrictStr = Field(min_length=1, max_length=128)
     distribution: StrictStr = Field(min_length=1, max_length=128)
     allow_network: StrictBool = False
     allow_model: StrictBool = False
 
 
-class ContractPolicy(StrictModel):
+class ContractPolicy(PolicyModel):
     schema_version: Literal["1.0"] = "1.0"
     profile: Literal["contract-safe"] = "contract-safe"
     profile_version: Literal["1.0"] = "1.0"
@@ -163,7 +170,7 @@ class ContractPolicy(StrictModel):
         return self
 
 
-class FrozenPolicy(StrictModel):
+class FrozenPolicy(PolicyModel):
     schema_version: Literal["1.0"] = "1.0"
     policy: ContractPolicy
     canonical_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")

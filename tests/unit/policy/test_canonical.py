@@ -124,3 +124,17 @@ def test_canonicalization_rejects_nfc_colliding_mapping_keys() -> None:
 
     with pytest.raises(PolicyValidationError):
         canonical_policy_bytes(policy)
+
+
+@pytest.mark.parametrize("entry_point", ["bytes", "digest"])
+def test_canonical_entry_points_revalidate_mutated_policy_instances(
+    entry_point: str,
+) -> None:
+    policy = _policy()
+    policy.expect[0].selector.ancestor_path = {"Agreement", "Schedule"}
+
+    with pytest.raises(PolicyValidationError):
+        if entry_point == "bytes":
+            canonical_policy_bytes(policy)
+        else:
+            policy_digest(policy)

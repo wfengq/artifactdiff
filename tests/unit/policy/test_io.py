@@ -434,3 +434,15 @@ def test_failed_replace_preserves_existing_policy(
 
     assert destination.read_text(encoding="utf-8") == "existing policy"
     assert list(tmp_path.iterdir()) == [destination]
+
+
+def test_write_policy_revalidates_mutated_policy_before_creating_files(
+    tmp_path: Path,
+) -> None:
+    policy = _policy()
+    policy.expect[0].selector.ancestor_path = {"Agreement", "Schedule"}
+
+    with pytest.raises(PolicyValidationError):
+        write_policy(policy, tmp_path / "policy.yaml")
+
+    assert list(tmp_path.iterdir()) == []

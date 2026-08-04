@@ -184,6 +184,51 @@ def test_selector_set_input_is_rejected_across_python_hash_seeds() -> None:
     assert outputs == ["rejected", "rejected", "rejected"]
 
 
+def test_model_constructed_selector_is_rejected_across_python_hash_seeds() -> None:
+    script = textwrap.dedent(
+        """
+        from pydantic import ValidationError
+        from artifactdiff.contract import ClauseSelector
+        from artifactdiff.policy import ExactReplace, ExpectedRule
+
+        selector = ClauseSelector.model_construct(
+            clause_label="Section 4",
+            heading="Payment",
+            ancestor_path={"Agreement", "Main Terms", "Schedule", "Annex"},
+            anchor="within 30 days",
+            baseline_fingerprint="",
+            occurrences=1,
+            matcher_version="1.0",
+            min_similarity=0.92,
+            min_margin=0.05,
+        )
+        try:
+            ExpectedRule(
+                id="payment-window",
+                selector=selector,
+                operation=ExactReplace(before="30 days", after="45 days"),
+            )
+        except ValidationError:
+            print("rejected")
+        else:
+            print("accepted:" + "|".join(selector.ancestor_path))
+        """
+    )
+    outputs = []
+    for seed in ("1", "2", "3"):
+        environment = {**os.environ, "PYTHONHASHSEED": seed}
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        outputs.append(completed.stdout.strip())
+
+    assert outputs == ["rejected", "rejected", "rejected"]
+
+
 def test_baseline_requires_one_exact_normalized_identity_match() -> None:
     selected = _clause(
         "clause-payment",
