@@ -3,7 +3,7 @@
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from artifactdiff.models import Rect, SourceDescriptor, StrictModel
 
@@ -27,6 +27,24 @@ class EvidenceRef(StrictModel):
     bbox: Rect | None = None
     rendered_page_index: int | None = None
     rendered_bbox: Rect | None = None
+
+
+class DocumentFeatureKind(StrEnum):
+    COMMENT = "comment"
+    TRACKED_REVISION = "tracked_revision"
+    HIDDEN_TEXT = "hidden_text"
+    EXTERNAL_LINK = "external_link"
+    EMBEDDED_IMAGE = "embedded_image"
+    METADATA = "metadata"
+
+
+class DocumentFeature(StrictModel):
+    id: str
+    kind: DocumentFeatureKind
+    fingerprint: str
+    count: int = Field(ge=1)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    details: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class ClauseLabel(StrictModel):
@@ -68,6 +86,7 @@ class ProtectedRegion(StrictModel):
     kind: ProtectedRegionKind
     text_fingerprint: str
     evidence: list[EvidenceRef] = Field(default_factory=list)
+    feature_fingerprints: list[str] = Field(default_factory=list)
 
 
 class ContractClause(StrictModel):
@@ -92,4 +111,5 @@ class ContractDocument(StrictModel):
     tables: list[EvidenceRef] = Field(default_factory=list)
     protected_regions: list[ProtectedRegion] = Field(default_factory=list)
     entities: list[ProtectedEntity] = Field(default_factory=list)
+    features: list[DocumentFeature] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

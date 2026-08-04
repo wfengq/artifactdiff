@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 from zipfile import BadZipFile
 
 from docx import Document
 from docx.document import Document as DocumentType
-from docx.oxml.ns import qn
 from docx.opc.exceptions import PackageNotFoundError
+from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 from lxml.etree import XMLSyntaxError
 
+from artifactdiff.contract.features import FeatureInspectionError, inspect_docx_features
 from artifactdiff.errors import ArtifactDiffError, InputValidationError, RenderUnavailableError
 from artifactdiff.formats.pdf import PdfAdapter
 from artifactdiff.libreoffice import convert_docx_to_pdf, find_libreoffice
@@ -28,6 +30,33 @@ def iter_body_items(document: DocumentType) -> Iterator[Paragraph | Table]:
             yield Paragraph(child, document)
         elif child.tag == qn("w:tbl"):
             yield Table(child, document)
+
+
+def _visible_paragraph_text(paragraph: Paragraph) -> str:
+    pieces: list[str] = []
+
+    def visit(node: Any) -> None:
+        tag = getattr(node, "tag", "")
+        if tag in {qn("w:ins"), qn("w:del")}:
+            return
+        if tag == qn("w:r"):
+            properties = node.find(qn("w:rPr"))
+            if properties is not None and any(
+                properties.find(qn(f"w:{kind}")) is not None
+                for kind in ("vanish", "webHidden")
+            ):
+                return
+        if tag == qn("w:t") and node.text:
+            pieces.append(str(node.text))
+        elif tag == qn("w:tab"):
+            pieces.append("\t")
+        elif tag in {qn("w:br"), qn("w:cr")}:
+            pieces.append("\n")
+        for child in node:
+            visit(child)
+
+    visit(paragraph._p)
+    return "".join(pieces)
 
 
 class DocxAdapter:
@@ -54,6 +83,10 @@ class DocxAdapter:
             if block is not None:
                 blocks.append(block)
         self._append_section_blocks(document, blocks)
+        try:
+            features = inspect_docx_features(path)
+        except FeatureInspectionError as error:
+            raise InputValidationError(f"invalid DOCX: {path}") from error
         warnings: list[str] = []
         pages: list[PageSnapshot] = []
         if render:
@@ -77,7 +110,15 @@ class DocxAdapter:
                         warnings.append(f"DOCX visual rendering unavailable: {error}")
                     else:
                         pages = rendered.pages
-        return DocumentSnapshot.from_path(path, pages=pages, blocks=blocks, warnings=warnings)
+        return DocumentSnapshot.from_path(
+            path,
+            pages=pages,
+            blocks=blocks,
+            warnings=warnings,
+            metadata={
+                "document_features": [feature.model_dump(mode="json") for feature in features]
+            },
+        )
 
     @staticmethod
     def _append_section_blocks(document: DocumentType, blocks: list[ContentBlock]) -> None:
@@ -110,7 +151,7 @@ class DocxAdapter:
     @staticmethod
     def _body_block(item: Paragraph | Table, ordinal: int) -> ContentBlock | None:
         if isinstance(item, Paragraph):
-            text = item.text.strip()
+            text = _visible_paragraph_text(item).strip()
             if not text:
                 return None
             style_name = item.style.name if item.style is not None else ""
@@ -134,7 +175,13 @@ class DocxAdapter:
                     }
                     break
         else:
-            rows = [[cell.text for cell in row.cells] for row in item.rows]
+            rows = [
+                [
+                    "\n".join(_visible_paragraph_text(paragraph) for paragraph in cell.paragraphs)
+                    for cell in row.cells
+                ]
+                for row in item.rows
+            ]
             text = "\n".join("\t".join(cells) for cells in rows)
             if not text.strip():
                 return None

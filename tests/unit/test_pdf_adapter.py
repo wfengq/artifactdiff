@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,10 @@ class FakePage:
     width = 612
     height = 792
 
+    def __init__(self) -> None:
+        self.annots: list[object] = []
+        self.images: list[object] = []
+
     def extract_words(self, **kwargs: object) -> list[object]:
         assert kwargs == {'use_text_flow': True, 'keep_blank_chars': False}
         return []
@@ -23,6 +28,7 @@ class FakePage:
 
 class FakeDocument:
     def __init__(self, page_count: int) -> None:
+        self.metadata: dict[str, object] = {}
         self.pages = [FakePage() for _ in range(page_count)]
 
     def __enter__(self) -> 'FakeDocument':
@@ -51,6 +57,33 @@ def test_pdf_adapter_extracts_text_geometry_and_renders(tmp_path: Path) -> None:
     assert snapshot.pages[0].blocks[0].bbox is not None
     assert Path(snapshot.pages[0].render_path).is_file()
     source.rename(tmp_path / 'source-was-closed.pdf')
+
+
+def test_pdf_adapter_extracts_bounded_metadata_link_and_image_features(tmp_path: Path) -> None:
+    from PIL import Image
+    from reportlab.pdfgen import canvas
+
+    image_path = tmp_path / "stamp.png"
+    Image.new("RGB", (8, 8), "red").save(image_path)
+    source = tmp_path / "features.pdf"
+    document = canvas.Canvas(str(source), invariant=1)
+    document.setAuthor("Private PDF Author")
+    document.drawString(72, 720, "Signature")
+    document.drawImage(str(image_path), 72, 680, width=20, height=20)
+    document.linkURL("https://example.test/private", (72, 710, 140, 730))
+    document.save()
+
+    snapshot = PdfAdapter().load(source, render=False, workdir=tmp_path / "work")
+
+    facts = snapshot.metadata["document_features"]
+    assert {item["kind"] for item in facts} >= {
+        "metadata",
+        "external_link",
+        "embedded_image",
+    }
+    serialized = json.dumps(facts, sort_keys=True)
+    assert "Private PDF Author" not in serialized
+    assert "https://example.test/private" not in serialized
 
 
 def test_pdf_adapter_preserves_reading_order_and_renders_at_144_dpi(tmp_path: Path) -> None:

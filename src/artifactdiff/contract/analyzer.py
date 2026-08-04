@@ -9,12 +9,14 @@ from artifactdiff.contract.models import (
     ClauseLabel,
     ContractClause,
     ContractDocument,
+    DocumentFeature,
+    DocumentFeatureKind,
     EvidenceRef,
     ProtectedRegion,
     ProtectedRegionKind,
 )
 from artifactdiff.contract.numbering import ClauseMarker, parse_clause_marker
-from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot, SourceDescriptor
+from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot, Rect, SourceDescriptor
 from artifactdiff.normalize import fingerprint, normalize_text
 
 SIGNATURE_TERMS = frozenset({"\u7b7e\u5b57", "\u7b7e\u540d", "\u6388\u6743\u4ee3\u8868", "signature", "signed by"})
@@ -83,14 +85,46 @@ def _region_kind(block: ContentBlock) -> ProtectedRegionKind | None:
     return None
 
 
-def _protected_region(block: ContentBlock, kind: ProtectedRegionKind) -> ProtectedRegion:
+def _rects_are_near(first: Rect | None, second: Rect | None, distance: float = 24.0) -> bool:
+    if first is None or second is None:
+        return False
+    horizontal_gap = max(first.x0 - second.x1, second.x0 - first.x1, 0.0)
+    vertical_gap = max(first.y0 - second.y1, second.y0 - first.y1, 0.0)
+    return horizontal_gap <= distance and vertical_gap <= distance
+
+
+def _image_matches_block(feature: DocumentFeature, block: ContentBlock) -> bool:
+    if feature.kind is not DocumentFeatureKind.EMBEDDED_IMAGE:
+        return False
+    for evidence in feature.evidence:
+        if evidence.block_id == block.id:
+            return True
+        if (
+            evidence.page_index is not None
+            and evidence.page_index == block.page_index
+            and _rects_are_near(evidence.bbox, block.bbox)
+        ):
+            return True
+    return False
+
+
+def _protected_region(
+    block: ContentBlock, kind: ProtectedRegionKind, features: list[DocumentFeature]
+) -> ProtectedRegion:
     text_fingerprint = fingerprint(block.text)
-    material = f"{kind.value}\0{text_fingerprint}\0{block.id}".encode("utf-8")
+    material = f"{kind.value}\0{text_fingerprint}\0{block.id}".encode()
+    matched_features = [feature for feature in features if _image_matches_block(feature, block)]
+    evidence = [_evidence(block)]
+    for feature in matched_features:
+        for item in feature.evidence:
+            if item not in evidence:
+                evidence.append(item)
     return ProtectedRegion(
         id=f"region-{hashlib.sha256(material).hexdigest()[:24]}",
         kind=kind,
         text_fingerprint=text_fingerprint,
-        evidence=[_evidence(block)],
+        evidence=evidence,
+        feature_fingerprints=sorted(feature.fingerprint for feature in matched_features),
     )
 
 
@@ -105,11 +139,15 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
     active_index: int | None = None
     tables: list[EvidenceRef] = []
     protected_regions: list[ProtectedRegion] = []
+    raw_features = snapshot.metadata.get("document_features", [])
+    if not isinstance(raw_features, list):
+        raise TypeError("document_features metadata must be a list")
+    features = [DocumentFeature.model_validate(item) for item in raw_features]
 
     for block in sorted(snapshot.blocks, key=lambda item: item.ordinal):
         region_kind = _region_kind(block)
         if region_kind is not None:
-            protected_regions.append(_protected_region(block, region_kind))
+            protected_regions.append(_protected_region(block, region_kind, features))
         if block.content_type is ContentType.TABLE:
             tables.append(_evidence(block))
         if block.content_type in {ContentType.HEADER, ContentType.FOOTER}:
@@ -200,5 +238,6 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
         tables=tables,
         protected_regions=protected_regions,
         entities=all_entities,
+        features=features,
         warnings=list(snapshot.warnings),
     )

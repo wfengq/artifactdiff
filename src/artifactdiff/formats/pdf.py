@@ -12,6 +12,7 @@ from pdfminer.pdfdocument import PDFPasswordIncorrect
 from pdfminer.pdfparser import PDFSyntaxError
 from pdfplumber.utils.exceptions import PdfminerException
 
+from artifactdiff.contract.features import FeatureInspectionError, inspect_pdf_features
 from artifactdiff.errors import InputValidationError, ResourceLimitError
 from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot, PageSnapshot, Rect
 from artifactdiff.normalize import fingerprint, normalize_text
@@ -59,6 +60,7 @@ class PdfAdapter:
                 pages = [
                     self._extract_page(page, index) for index, page in enumerate(document.pages)
                 ]
+                features = inspect_pdf_features(document)
         except ResourceLimitError:
             raise
         except PdfminerException as error:
@@ -72,11 +74,20 @@ class PdfAdapter:
             raise InputValidationError(f"invalid PDF: {path}") from error
         except OSError as error:
             raise InputValidationError(f"invalid PDF: {path}") from error
+        except FeatureInspectionError as error:
+            raise InputValidationError(f"invalid PDF: {path}") from error
 
         if render:
             self._render_pages(path, pages, workdir)
         blocks = [block for page in pages for block in page.blocks]
-        return DocumentSnapshot.from_path(path, pages=pages, blocks=blocks)
+        return DocumentSnapshot.from_path(
+            path,
+            pages=pages,
+            blocks=blocks,
+            metadata={
+                "document_features": [feature.model_dump(mode="json") for feature in features]
+            },
+        )
 
     def _extract_page(self, page: Any, page_index: int) -> PageSnapshot:
         words = page.extract_words(use_text_flow=True, keep_blank_chars=False) or []

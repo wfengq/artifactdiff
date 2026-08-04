@@ -30,6 +30,21 @@ def test_docx_adapter_preserves_heading_paragraph_table_order(tmp_path: Path) ->
     assert snapshot.blocks[2].metadata == {"rows": 2, "columns": 2}
 
 
+def test_docx_adapter_serializes_bounded_document_features(tmp_path: Path) -> None:
+    source = tmp_path / "metadata.docx"
+    document = Document()
+    document.core_properties.author = "Private Fixture Author"
+    document.add_paragraph("Terms")
+    document.save(source)
+
+    snapshot = DocxAdapter().load(source, render=False, workdir=tmp_path / "work")
+
+    facts = snapshot.metadata["document_features"]
+    assert isinstance(facts, list)
+    assert any(item["kind"] == "metadata" for item in facts)
+    assert "Private Fixture Author" not in str(facts)
+
+
 def test_docx_adapter_preserves_lists_with_stable_dense_block_identity(tmp_path: Path) -> None:
     source = tmp_path / "lists.docx"
     document = Document()
