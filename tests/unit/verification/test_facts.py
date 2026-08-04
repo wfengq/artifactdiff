@@ -109,13 +109,22 @@ def test_diff_contracts_records_exact_payment_text_and_duration_change() -> None
 
 
 def test_diff_contracts_keeps_duplicate_identity_and_fingerprint_ties_unresolved() -> None:
+    shared_fingerprint = "f" * 64
     baseline = _contract(
-        _clause("baseline-one", "Article II Payment Terms\nFirst version."),
-        _clause("baseline-two", "Article II Payment Terms\nSecond version."),
+        _clause("baseline-one", "Article II Payment Terms\nFirst version.").model_copy(
+            update={"fingerprint": shared_fingerprint}
+        ),
+        _clause("baseline-two", "Article II Payment Terms\nSecond version.").model_copy(
+            update={"fingerprint": shared_fingerprint}
+        ),
     )
     candidate = _contract(
-        _clause("candidate-one", "Article II Payment Terms\nChanged first."),
-        _clause("candidate-two", "Article II Payment Terms\nChanged second."),
+        _clause("candidate-one", "Article II Payment Terms\nChanged first.").model_copy(
+            update={"fingerprint": shared_fingerprint}
+        ),
+        _clause("candidate-two", "Article II Payment Terms\nChanged second.").model_copy(
+            update={"fingerprint": shared_fingerprint}
+        ),
         sha="b",
     )
 
@@ -128,6 +137,146 @@ def test_diff_contracts_keeps_duplicate_identity_and_fingerprint_ties_unresolved
         "candidate-one",
         "candidate-two",
     ]
+
+
+def test_same_fingerprint_duplicates_only_before_are_all_removed_with_evidence() -> None:
+    shared_fingerprint = "f" * 64
+    first_evidence = EvidenceRef(block_id="before-a")
+    second_evidence = EvidenceRef(block_id="before-b")
+    first = _clause(
+        "baseline-a",
+        "Article I Parties\nShared body.",
+        label="article i",
+        heading="Parties",
+    ).model_copy(update={"fingerprint": shared_fingerprint, "evidence": [first_evidence]})
+    second = _clause(
+        "baseline-b",
+        "Article II Payment\nShared body.",
+        label="article ii",
+        heading="Payment",
+    ).model_copy(update={"fingerprint": shared_fingerprint, "evidence": [second_evidence]})
+
+    facts = diff_contracts(_contract(first, second), _contract(sha="b"))
+
+    assert facts.unresolved_clause_ids == []
+    assert {
+        (item.kind, item.before_clause_id, item.before_text, item.before_evidence[0].block_id)
+        for item in facts.clause_changes
+    } == {
+        (ClauseChangeKind.REMOVED, "baseline-a", first.text, "before-a"),
+        (ClauseChangeKind.REMOVED, "baseline-b", second.text, "before-b"),
+    }
+
+
+def test_same_fingerprint_duplicates_only_after_are_all_added_with_evidence() -> None:
+    shared_fingerprint = "f" * 64
+    first = _clause(
+        "candidate-a",
+        "Article I Parties\nShared body.",
+        label="article i",
+        heading="Parties",
+        block_id="after-a",
+    ).model_copy(update={"fingerprint": shared_fingerprint})
+    second = _clause(
+        "candidate-b",
+        "Article II Payment\nShared body.",
+        label="article ii",
+        heading="Payment",
+        block_id="after-b",
+    ).model_copy(update={"fingerprint": shared_fingerprint})
+
+    facts = diff_contracts(_contract(), _contract(first, second, sha="b"))
+
+    assert facts.unresolved_clause_ids == []
+    assert {
+        (item.kind, item.after_clause_id, item.after_text, item.after_evidence[0].block_id)
+        for item in facts.clause_changes
+    } == {
+        (ClauseChangeKind.ADDED, "candidate-a", first.text, "after-a"),
+        (ClauseChangeKind.ADDED, "candidate-b", second.text, "after-b"),
+    }
+
+
+def test_duplicate_identity_on_only_one_side_is_not_ambiguous() -> None:
+    first = _clause("baseline-a", "Article II Payment Terms\nFirst body.")
+    second = _clause("baseline-b", "Article II Payment Terms\nSecond body.")
+
+    facts = diff_contracts(_contract(first, second), _contract(sha="b"))
+
+    assert facts.unresolved_clause_ids == []
+    assert {(item.kind, item.before_clause_id) for item in facts.clause_changes} == {
+        (ClauseChangeKind.REMOVED, "baseline-a"),
+        (ClauseChangeKind.REMOVED, "baseline-b"),
+    }
+
+    symmetric = diff_contracts(
+        _contract(),
+        _contract(
+            first.model_copy(update={"id": "candidate-a"}),
+            second.model_copy(update={"id": "candidate-b"}),
+            sha="b",
+        ),
+    )
+
+    assert symmetric.unresolved_clause_ids == []
+    assert {(item.kind, item.after_clause_id) for item in symmetric.clause_changes} == {
+        (ClauseChangeKind.ADDED, "candidate-a"),
+        (ClauseChangeKind.ADDED, "candidate-b"),
+    }
+
+
+def test_unique_identities_disambiguate_duplicate_fingerprints_before_fallback() -> None:
+    shared_fingerprint = "f" * 64
+    first_before = _clause(
+        "baseline-a", "Article I Parties\nShared body.", label="article i", heading="Parties"
+    ).model_copy(update={"fingerprint": shared_fingerprint})
+    second_before = _clause(
+        "baseline-b",
+        "Article II Payment\nShared body.",
+        label="article ii",
+        heading="Payment",
+    ).model_copy(update={"fingerprint": shared_fingerprint})
+    first_after = first_before.model_copy(update={"id": "candidate-a"})
+    second_after = second_before.model_copy(update={"id": "candidate-b"})
+
+    facts = diff_contracts(
+        _contract(first_before, second_before),
+        _contract(first_after, second_after, sha="b"),
+    )
+
+    assert facts.clause_changes == []
+    assert facts.unresolved_clause_ids == []
+
+
+def test_unique_fingerprint_pair_disambiguates_one_sided_duplicate_identity() -> None:
+    paired = _clause("baseline-paired", "Article II Payment Terms\nExact body.")
+    removed = _clause("baseline-removed", "Article II Payment Terms\nRemoved body.")
+    candidate_pair = paired.model_copy(update={"id": "candidate-paired"})
+
+    facts = diff_contracts(_contract(paired, removed), _contract(candidate_pair, sha="b"))
+
+    assert facts.unresolved_clause_ids == []
+    assert [
+        (item.kind, item.before_clause_id, item.after_clause_id) for item in facts.clause_changes
+    ] == [(ClauseChangeKind.REMOVED, "baseline-removed", None)]
+
+
+def test_one_sided_duplicate_classification_is_permutation_stable() -> None:
+    shared_fingerprint = "f" * 64
+    first = _clause(
+        "baseline-a", "Article I Parties\nShared body.", label="article i", heading="Parties"
+    ).model_copy(update={"fingerprint": shared_fingerprint})
+    second = _clause(
+        "baseline-b",
+        "Article II Payment\nShared body.",
+        label="article ii",
+        heading="Payment",
+    ).model_copy(update={"fingerprint": shared_fingerprint})
+
+    ordered = diff_contracts(_contract(first, second), _contract(sha="b"))
+    permuted = diff_contracts(_contract(second, first), _contract(sha="b"))
+
+    assert ordered.model_dump_json() == permuted.model_dump_json()
 
 
 def test_clause_evidence_order_does_not_change_fact_bytes() -> None:

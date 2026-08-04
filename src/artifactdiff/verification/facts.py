@@ -223,8 +223,10 @@ def _classify_unmatched(
     ) -> bool:
         identity = _identity(clause)
         fingerprint_value = clause.fingerprint
-        identity_tied = own_identity[identity] > 1 or other_identity[identity] > 1
-        fingerprint_tied = (
+        identity_tied = other_identity[identity] > 0 and (
+            own_identity[identity] > 1 or other_identity[identity] > 1
+        )
+        fingerprint_tied = other_fingerprint[fingerprint_value] > 0 and (
             own_fingerprint[fingerprint_value] > 1 or other_fingerprint[fingerprint_value] > 1
         )
         return identity_tied or fingerprint_tied
