@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-04
 
-**Status:** Approved in conversation; awaiting written-spec review
+**Status:** Approved
 
 **Target:** ArtifactDiff 1.0
 
@@ -421,7 +421,8 @@ Existing `compare` and `inspect` behavior remains compatible. Contract workflows
 artifactdiff policy create BASELINE -o POLICY
 artifactdiff policy validate BASELINE POLICY
 artifactdiff policy seal BASELINE POLICY [--sign IDENTITY] -o SEALED_POLICY
-artifactdiff verify BASELINE CANDIDATE --policy SEALED_POLICY --output BUNDLE
+artifactdiff session open BASELINE --policy SIGNED_POLICY --output SESSION
+artifactdiff verify BASELINE CANDIDATE --policy SEALED_POLICY [--session SESSION] --output BUNDLE
 artifactdiff review BUNDLE
 artifactdiff approve BUNDLE --finding ID --reason TEXT --sign IDENTITY
 artifactdiff bundle verify BUNDLE
@@ -446,7 +447,9 @@ MCP exposes bounded adapters over the same application services:
 - `verify_review_bundle`
 
 MCP intentionally does not expose finding approval or verified signing. An agent may
-create a pending authorization request but cannot approve it. Inputs and outputs must
+create a pending authorization request but cannot approve it. `seal_local_policy` and
+`verify_contract_change` operate at local assurance; a signed policy requires the
+controlled session and manifest-signing workflow outside MCP. Inputs and outputs must
 remain within independently configured resolved input and output roots. MCP responses do
 not contain full pages, full contracts, private keys, or unbounded findings.
 
