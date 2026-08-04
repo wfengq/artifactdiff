@@ -253,6 +253,96 @@ def test_draft_rejects_count_mismatch_noop_and_existing_after_text(
 
 
 @pytest.mark.parametrize(
+    ("text", "anchor", "before", "after", "occurrences"),
+    [
+        ("Payment is due within 30 days.", "Payment", "30 days", "days", 1),
+        ("Payment is due within 30 days.", "Payment", "within 30 days", "30 days", 1),
+        ("term aaaa term", "term", "aa", "a", 2),
+        (
+            "Pay within 30 days. Pay within 30 days.",
+            "Pay",
+            "30 days",
+            "45 days",
+            2,
+        ),
+    ],
+)
+def test_exact_replacement_accepts_unambiguous_substrings_overlaps_and_multiple_occurrences(
+    text: str,
+    anchor: str,
+    before: str,
+    after: str,
+    occurrences: int,
+) -> None:
+    clause = _clause(text=text)
+    baseline = _contract(clause)
+    selector = ClauseSelector(
+        clause_label=clause.label.normalized,
+        heading=clause.heading,
+        ancestor_path=clause.ancestor_path,
+        anchor=anchor,
+        occurrences=occurrences,
+    )
+
+    policy = draft_exact_replace_policy(
+        baseline,
+        selector,
+        before=before,
+        after=after,
+        rule_id="payment-window",
+    )
+
+    validate_policy(baseline, policy)
+    assert policy.expect[0].operation.occurrences == occurrences
+
+
+@pytest.mark.parametrize(
+    ("text", "anchor", "before", "after", "occurrences"),
+    [
+        (
+            "Payment within 30 days; independent extension is 45 days.",
+            "Payment",
+            "30 days",
+            "45 days",
+            1,
+        ),
+        (
+            "Pay within 30 days. Pay within 30 days. Legacy term is 45 days.",
+            "Pay",
+            "30 days",
+            "45 days",
+            2,
+        ),
+        ("term aaaa term a", "term", "aa", "a", 2),
+    ],
+)
+def test_exact_replacement_rejects_independent_preexisting_after_ambiguity(
+    text: str,
+    anchor: str,
+    before: str,
+    after: str,
+    occurrences: int,
+) -> None:
+    clause = _clause(text=text)
+    selector = ClauseSelector(
+        clause_label=clause.label.normalized,
+        heading=clause.heading,
+        ancestor_path=clause.ancestor_path,
+        anchor=anchor,
+        occurrences=occurrences,
+    )
+
+    with pytest.raises(PolicyValidationError, match="replacement"):
+        draft_exact_replace_policy(
+            _contract(clause),
+            selector,
+            before=before,
+            after=after,
+            rule_id="payment-window",
+        )
+
+
+@pytest.mark.parametrize(
     "policy_update",
     [
         {"baseline": PolicyBaseline(sha256="b" * 64, format="docx")},

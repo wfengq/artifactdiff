@@ -15,9 +15,13 @@ from artifactdiff.errors import PolicyValidationError
 from artifactdiff.models import SourceDescriptor
 from artifactdiff.normalize import fingerprint, normalize_text
 from artifactdiff.policy import (
+    ContractPolicy,
+    FrozenPolicy,
+    PolicyPluginRequirement,
     draft_exact_replace_policy,
     freeze_policy,
     load_frozen_policy,
+    policy_digest,
     write_frozen_policy,
 )
 
@@ -63,6 +67,42 @@ def _frozen():
     return freeze_policy(baseline, policy)
 
 
+def _redigested_semantically_invalid_frozen(case: str) -> FrozenPolicy:
+    policy = _frozen().policy.model_copy(deep=True)
+    if case == "empty-expect":
+        policy.expect = []
+    elif case in {"allow-network", "allow-model"}:
+        policy.required_plugins = {
+            "CUSTOMER_SECRET": PolicyPluginRequirement(
+                version="1",
+                distribution="CUSTOMER_SECRET",
+                allow_network=case == "allow-network",
+                allow_model=case == "allow-model",
+            )
+        }
+    elif case == "missing-fingerprint":
+        policy.expect[0].selector.baseline_fingerprint = ""
+    elif case == "no-op":
+        policy.expect[0].operation.after = policy.expect[0].operation.before
+    else:
+        policy.expect[0].operation.occurrences = 2
+    checked_policy = ContractPolicy.model_validate(policy)
+    return FrozenPolicy(
+        policy=checked_policy,
+        canonical_sha256=policy_digest(checked_policy),
+    )
+
+
+_SEMANTIC_BYPASS_CASES = [
+    "empty-expect",
+    "allow-network",
+    "allow-model",
+    "missing-fingerprint",
+    "no-op",
+    "occurrence-mismatch",
+]
+
+
 def test_frozen_policy_round_trip_is_deterministic_canonical_json(tmp_path: Path) -> None:
     frozen = _frozen()
     first = write_frozen_policy(frozen, tmp_path / "first.json")
@@ -85,6 +125,41 @@ def test_load_frozen_policy_rejects_digest_tampering_without_disclosure(
     )
 
     with pytest.raises(PolicyValidationError, match="digest") as error:
+        load_frozen_policy(destination)
+
+    assert "CUSTOMER_SECRET" not in str(error.value)
+
+
+@pytest.mark.parametrize("case", _SEMANTIC_BYPASS_CASES)
+def test_write_rejects_correctly_redigested_semantic_bypasses_before_creating_files(
+    tmp_path: Path, case: str
+) -> None:
+    destination = tmp_path / "CUSTOMER_SECRET.json"
+
+    with pytest.raises(PolicyValidationError) as error:
+        write_frozen_policy(_redigested_semantically_invalid_frozen(case), destination)
+
+    assert "CUSTOMER_SECRET" not in str(error.value)
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("case", _SEMANTIC_BYPASS_CASES)
+def test_load_rejects_correctly_redigested_semantic_bypasses_nondisclosing(
+    tmp_path: Path, case: str
+) -> None:
+    frozen = _redigested_semantically_invalid_frozen(case)
+    destination = tmp_path / "CUSTOMER_SECRET.json"
+    destination.write_text(
+        json.dumps(
+            frozen.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(PolicyValidationError) as error:
         load_frozen_policy(destination)
 
     assert "CUSTOMER_SECRET" not in str(error.value)

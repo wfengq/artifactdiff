@@ -64,6 +64,29 @@ def _canonicalized_policy(policy: ContractPolicy) -> ContractPolicy:
         raise _invalid_contract_policy() from None
 
 
+def _validate_expected_rule_semantics(rule: ExpectedRule) -> None:
+    if not rule.selector.baseline_fingerprint:
+        raise PolicyValidationError("expected selector fingerprint is required")
+    if _nfc(rule.operation.before) == _nfc(rule.operation.after):
+        raise PolicyValidationError("expected replacement must change text")
+    if rule.operation.occurrences != rule.selector.occurrences:
+        raise PolicyValidationError("expected replacement occurrence mismatch")
+
+
+def _validate_contract_safe_semantics(policy: ContractPolicy) -> None:
+    if not policy.expect:
+        raise PolicyValidationError("contract-safe requires at least one exact expected operation")
+    validate_contract_safe_plugins(policy)
+    for expected_rule in policy.expect:
+        _validate_expected_rule_semantics(expected_rule)
+
+
+def _validated_contract_safe_policy(policy: ContractPolicy) -> ContractPolicy:
+    canonical_policy = _canonicalized_policy(policy)
+    _validate_contract_safe_semantics(canonical_policy)
+    return canonical_policy
+
+
 def _validated_selector(selector: ClauseSelector) -> ClauseSelector:
     try:
         return ClauseSelector.model_validate(selector)
@@ -88,15 +111,14 @@ def _nfc(value: str) -> str:
 
 def _validate_exact_operation(clause: ContractClause, rule: ExpectedRule) -> None:
     operation = rule.operation
-    if _nfc(operation.before) == _nfc(operation.after):
-        raise PolicyValidationError("expected replacement must change text")
-    if operation.occurrences != rule.selector.occurrences:
-        raise PolicyValidationError("expected replacement occurrence mismatch")
     clause_text = _nfc(clause.text)
-    if clause_text.count(_nfc(operation.before)) != operation.occurrences:
+    before = _nfc(operation.before)
+    after = _nfc(operation.after)
+    if clause_text.count(before) != operation.occurrences:
         raise PolicyValidationError("expected text occurrence mismatch")
-    if clause_text.count(_nfc(operation.after)) != 0:
-        raise PolicyValidationError("expected replacement is already present")
+    expected_clause = clause_text.replace(before, after, operation.occurrences)
+    if expected_clause.count(after) != operation.occurrences:
+        raise PolicyValidationError("expected replacement occurrence ambiguity")
 
 
 def draft_exact_replace_policy(
@@ -132,6 +154,7 @@ def draft_exact_replace_policy(
                 occurrences=supplied_selector.occurrences,
             ),
         )
+        _validate_expected_rule_semantics(rule)
         _validate_exact_operation(clause, rule)
         return ContractPolicy(
             baseline=PolicyBaseline(
@@ -155,21 +178,22 @@ def validate_policy(baseline: ContractDocument, policy: ContractPolicy) -> None:
         or checked_policy.baseline.format != checked_baseline.source.format
     ):
         raise PolicyValidationError("policy baseline does not match the inspected contract")
-    if not checked_policy.expect:
-        raise PolicyValidationError("contract-safe requires at least one exact expected operation")
-    validate_contract_safe_plugins(checked_policy)
+    resolved_expected: list[tuple[ExpectedRule, ContractClause]] = []
     for expected_rule in checked_policy.expect:
         clause = _resolve_unique_clause(checked_baseline, expected_rule.selector)
         if expected_rule.selector.baseline_fingerprint != clause.fingerprint:
             raise PolicyValidationError("expected selector fingerprint mismatch")
-        _validate_exact_operation(clause, expected_rule)
+        resolved_expected.append((expected_rule, clause))
     for allow_rule in checked_policy.allow:
         _resolve_unique_clause(checked_baseline, allow_rule.selector)
+    _validate_contract_safe_semantics(checked_policy)
+    for expected_rule, clause in resolved_expected:
+        _validate_exact_operation(clause, expected_rule)
 
 
 def freeze_policy(baseline: ContractDocument, policy: ContractPolicy) -> FrozenPolicy:
     """Validate and snapshot a deterministic locally assured policy."""
-    checked_policy = _canonicalized_policy(policy)
+    checked_policy = _validated_contract_safe_policy(policy)
     validate_policy(baseline, checked_policy)
     try:
         return FrozenPolicy(
@@ -184,7 +208,7 @@ def freeze_policy(baseline: ContractDocument, policy: ContractPolicy) -> FrozenP
 def _validated_frozen_policy(policy: FrozenPolicy) -> FrozenPolicy:
     try:
         validated = FrozenPolicy.model_validate(policy)
-        canonical_policy = _canonicalized_policy(validated.policy)
+        canonical_policy = _validated_contract_safe_policy(validated.policy)
         canonical_digest = policy_digest(canonical_policy)
         if validated.canonical_sha256 != canonical_digest:
             raise PolicyValidationError("frozen policy digest mismatch")
