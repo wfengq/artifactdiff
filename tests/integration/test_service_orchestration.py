@@ -508,6 +508,82 @@ def test_failed_visual_replacement_restores_existing_page_assets(
     assert not [path for path in (output / "visual").iterdir() if path.name.startswith(".")]
 
 
+def test_interleaved_visual_root_creation_is_not_removed_on_copy_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    left = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Revenue 100"],
+        render=True,
+        colors=["white"],
+    )
+    right = _snapshot(
+        after,
+        tmp_path / "after",
+        texts=["Revenue 101"],
+        render=True,
+        colors=["black"],
+    )
+    output = tmp_path / "output"
+    visual_root = output / "visual"
+    mkdir = Path.mkdir
+    interleaved = False
+
+    def create_by_other_writer(path: Path, *args: object, **kwargs: object) -> None:
+        nonlocal interleaved
+        if path == visual_root and not interleaved:
+            interleaved = True
+            mkdir(path, *args, **kwargs)
+        mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", create_by_other_writer)
+    monkeypatch.setattr(
+        "artifactdiff.visual_service.copy2", Mock(side_effect=OSError("copy unavailable"))
+    )
+
+    with pytest.raises(OSError, match="copy unavailable"):
+        compare_visual_pages(left, right, output, pixel_threshold=16, tile_size=32)
+
+    assert interleaved is True
+    assert visual_root.is_dir()
+
+
+def test_existing_visual_lock_blocks_writer_without_moving_current_assets(
+    tmp_path: Path,
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    left = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Revenue 100"],
+        render=True,
+        colors=["white"],
+    )
+    right = _snapshot(
+        after,
+        tmp_path / "after",
+        texts=["Revenue 101"],
+        render=True,
+        colors=["black"],
+    )
+    output = tmp_path / "output"
+    compare_visual_pages(left, right, output, pixel_threshold=16, tile_size=32)
+    current = output / "visual" / "page-1-1"
+    sentinel = current / "current.txt"
+    sentinel.write_text("current", encoding="utf-8")
+    lock = output / ".artifactdiff-visual.lock"
+    lock.mkdir()
+
+    with pytest.raises(InputValidationError, match="locked"):
+        compare_visual_pages(left, right, output, pixel_threshold=16, tile_size=32)
+
+    assert sentinel.read_text(encoding="utf-8") == "current"
+    assert lock.is_dir()
+    assert not [path for path in (output / "visual").iterdir() if path.name.startswith(".")]
+
+
 def test_duplicate_snapshot_render_warnings_are_deduplicated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

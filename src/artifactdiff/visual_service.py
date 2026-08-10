@@ -1,5 +1,7 @@
 """Deterministic visual page comparison orchestration."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2, rmtree
@@ -35,6 +37,26 @@ def compare_visual_pages(
 ) -> VisualComparison:
     """Compare aligned rendered pages and copy changed-page artifacts."""
     output_dir = output_dir.expanduser().resolve()
+    with _visual_output_lock(output_dir):
+        return _compare_visual_pages(
+            before,
+            after,
+            output_dir,
+            pixel_threshold=pixel_threshold,
+            tile_size=tile_size,
+            include_unpaired=include_unpaired,
+        )
+
+
+def _compare_visual_pages(
+    before: DocumentSnapshot,
+    after: DocumentSnapshot,
+    output_dir: Path,
+    *,
+    pixel_threshold: int,
+    tile_size: int,
+    include_unpaired: bool,
+) -> VisualComparison:
     warnings = [*before.warnings, *after.warnings]
     visual_changes: list[VisualPageChange] = []
     assets: dict[str, VisualAssets] = {}
@@ -141,8 +163,12 @@ def _copy_visual_assets(assets: VisualAssets, destination: Path) -> VisualAssets
     visual_root = destination.parent
     if visual_root.is_symlink() or destination.is_symlink():
         raise InputValidationError("visual artifact destination must not be a symlink")
-    visual_root_created = not visual_root.exists()
-    visual_root.mkdir(parents=True, exist_ok=True)
+    try:
+        visual_root.mkdir(parents=True)
+    except FileExistsError:
+        visual_root_created = False
+    else:
+        visual_root_created = True
     if visual_root.is_symlink():
         raise InputValidationError("visual artifact destination must not be a symlink")
     if destination.exists() and not destination.is_dir():
@@ -179,6 +205,24 @@ def _copy_visual_assets(assets: VisualAssets, destination: Path) -> VisualAssets
         after_image=destination / "after.png",
         heatmap_image=destination / "heatmap.png",
     )
+
+
+@contextmanager
+def _visual_output_lock(output_dir: Path) -> Iterator[None]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    lock = output_dir / ".artifactdiff-visual.lock"
+    if lock.is_symlink():
+        raise InputValidationError("visual output lock must not be a symlink")
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        if lock.is_symlink():
+            raise InputValidationError("visual output lock must not be a symlink") from None
+        raise InputValidationError("visual output is locked") from None
+    try:
+        yield
+    finally:
+        lock.rmdir()
 
 
 def _page_pair_order(pair: AlignedPair[PageSnapshot]) -> tuple[int, int]:
