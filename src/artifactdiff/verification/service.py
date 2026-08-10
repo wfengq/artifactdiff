@@ -86,7 +86,7 @@ def _verify_contract_change_locked(
             force=False,
             workdir=workdir / "candidate",
         )
-        with _visual_output_transaction(output_root, enabled=options.visual):
+        with _visual_output_transaction(output_root):
             visual = _visual_comparison(
                 baseline_snapshot,
                 candidate_snapshot,
@@ -199,15 +199,12 @@ def _verification_output_lock(output_root: Path) -> Iterator[None]:
 
 
 @contextmanager
-def _visual_output_transaction(output_root: Path, *, enabled: bool) -> Iterator[None]:
-    if not enabled:
-        yield
-        return
-
+def _visual_output_transaction(output_root: Path) -> Iterator[None]:
     visual_root = output_root / "visual"
-    if visual_root.is_symlink() or (visual_root.exists() and not visual_root.is_dir()):
-        yield
-        return
+    if visual_root.is_symlink():
+        raise InputValidationError("visual artifact destination must not be a symlink")
+    if visual_root.exists() and not visual_root.is_dir():
+        raise InputValidationError("visual artifact destination must be a directory")
 
     backup: Path | None = None
     if visual_root.is_dir():

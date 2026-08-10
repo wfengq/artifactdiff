@@ -159,6 +159,187 @@ def test_visual_false_defaults_to_blocking_review(tmp_path: Path) -> None:
     )
 
 
+def test_nonvisual_rerun_removes_previous_visual_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "existing"
+    source_root.mkdir()
+    _colored_rendering_adapters(
+        monkeypatch,
+        {
+            ("existing", "baseline"): "white",
+            ("existing", "candidate"): "black",
+        },
+    )
+    baseline, candidate, frozen = contract_edit_fixture(source_root, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    visual_run = verify_contract_change(
+        baseline, candidate, frozen, output, options=VerificationOptions()
+    )
+    assert visual_run.visual_assets
+    assert (output / "visual").is_dir()
+
+    nonvisual_run = verify_contract_change(
+        baseline,
+        candidate,
+        frozen,
+        output,
+        options=VerificationOptions(visual=False),
+    )
+
+    payload = json.loads(nonvisual_run.json_path.read_text(encoding="utf-8"))
+    assert nonvisual_run.result.outcome is FindingOutcome.REVIEW
+    assert payload["environment"]["visual_available"] is False
+    assert payload["raw_verdict"]["outcome"] == "review"
+    assert nonvisual_run.visual_assets == {}
+    assert set(output.iterdir()) == {output / "verification.json"}
+
+
+def test_failed_nonvisual_report_commit_restores_previous_complete_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_root = tmp_path / "existing"
+    source_root.mkdir()
+    _colored_rendering_adapters(
+        monkeypatch,
+        {
+            ("existing", "baseline"): "white",
+            ("existing", "candidate"): "black",
+        },
+    )
+    baseline, candidate, frozen = contract_edit_fixture(source_root, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    visual_run = verify_contract_change(
+        baseline, candidate, frozen, output, options=VerificationOptions()
+    )
+    assert visual_run.visual_assets
+    user_owned = output / "user-owned"
+    user_owned.mkdir()
+    (user_owned / "sentinel.txt").write_bytes(b"preserve me")
+    report_before = visual_run.json_path.read_bytes()
+    visual_before = {
+        path.relative_to(output / "visual"): path.read_bytes()
+        for path in (output / "visual").rglob("*")
+        if path.is_file()
+    }
+    files_before = {
+        path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()
+    }
+    directories_before = {path.relative_to(output) for path in output.rglob("*") if path.is_dir()}
+    original_replace = Path.replace
+    commit_observations: list[tuple[bool, int]] = []
+
+    def fail_report_commit(source: Path, destination: Path) -> Path:
+        if destination == output.resolve() / "verification.json":
+            commit_observations.append(
+                (
+                    (output / "visual").exists(),
+                    len(list(output.glob(".artifactdiff-visual-backup.*"))),
+                )
+            )
+            raise OSError("nonvisual report commit failed")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_report_commit)
+
+    with pytest.raises(OSError, match="nonvisual report commit failed"):
+        verify_contract_change(
+            baseline,
+            candidate,
+            frozen,
+            output,
+            options=VerificationOptions(visual=False),
+        )
+
+    assert commit_observations == [(False, 1)]
+    assert visual_run.json_path.read_bytes() == report_before
+    assert {
+        path.relative_to(output / "visual"): path.read_bytes()
+        for path in (output / "visual").rglob("*")
+        if path.is_file()
+    } == visual_before
+    assert {
+        path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()
+    } == files_before
+    assert {path.relative_to(output) for path in output.rglob("*") if path.is_dir()} == (
+        directories_before
+    )
+
+
+def test_nonvisual_run_without_prior_visual_root_does_not_create_one(tmp_path: Path) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+
+    run = verify_contract_change(
+        baseline,
+        candidate,
+        frozen,
+        output,
+        options=VerificationOptions(visual=False),
+    )
+
+    assert run.json_path.is_file()
+    assert not (output / "visual").exists()
+    assert set(output.iterdir()) == {run.json_path}
+
+
+def test_failed_nonvisual_run_without_prior_visual_root_does_not_create_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    original_replace = Path.replace
+
+    def fail_report_commit(source: Path, destination: Path) -> Path:
+        if destination == output.resolve() / "verification.json":
+            raise OSError("nonvisual report commit failed")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_report_commit)
+
+    with pytest.raises(OSError, match="nonvisual report commit failed"):
+        verify_contract_change(
+            baseline,
+            candidate,
+            frozen,
+            output,
+            options=VerificationOptions(visual=False),
+        )
+
+    assert not (output / "visual").exists()
+    assert list(output.iterdir()) == []
+
+
+def test_nonvisual_run_rejects_symlinked_visual_root_without_following_it(
+    tmp_path: Path,
+) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    output.mkdir()
+    outside = tmp_path / "outside-visual"
+    outside.mkdir()
+    sentinel = outside / "sentinel.png"
+    sentinel.write_bytes(b"outside visual evidence")
+    visual_root = output / "visual"
+    try:
+        visual_root.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable in this test environment")
+
+    with pytest.raises(InputValidationError, match="symlink"):
+        verify_contract_change(
+            baseline,
+            candidate,
+            frozen,
+            output,
+            options=VerificationOptions(visual=False),
+        )
+
+    assert visual_root.is_symlink()
+    assert sentinel.read_bytes() == b"outside visual evidence"
+    assert set(output.iterdir()) == {visual_root}
+
+
 def test_verification_json_is_deterministic_across_output_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
