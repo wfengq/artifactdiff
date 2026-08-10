@@ -1,8 +1,11 @@
 """Cross-format, contract-safe verification orchestration."""
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from shutil import rmtree
+from tempfile import TemporaryDirectory, mkdtemp
 
 from artifactdiff.contract import load_contract
 from artifactdiff.errors import InputValidationError, PolicyValidationError
@@ -41,6 +44,25 @@ def verify_contract_change(
     options: VerificationOptions,
 ) -> VerificationRun:
     """Verify one exact contract edit without network, model, or approval steps."""
+    output_root = output_dir.expanduser().resolve()
+    with _verification_output_lock(output_root):
+        return _verify_contract_change_locked(
+            baseline,
+            candidate,
+            frozen_policy,
+            output_root,
+            options=options,
+        )
+
+
+def _verify_contract_change_locked(
+    baseline: Path,
+    candidate: Path,
+    frozen_policy: FrozenPolicy,
+    output_root: Path,
+    *,
+    options: VerificationOptions,
+) -> VerificationRun:
     checked_baseline = validate_source(baseline, force=False)
     checked_candidate = validate_source(candidate, force=False)
     if frozen_policy.policy.baseline.sha256 != sha256_file(checked_baseline):
@@ -64,34 +86,35 @@ def verify_contract_change(
             force=False,
             workdir=workdir / "candidate",
         )
-        visual = _visual_comparison(
-            baseline_snapshot,
-            candidate_snapshot,
-            output_dir,
-            options,
-        )
-        facts = diff_contracts(baseline_contract, candidate_contract)
-        verdict = evaluate_contract(
-            frozen_policy,
-            baseline_contract,
-            candidate_contract,
-            facts,
-            visual.visual_changes,
-            visual.available,
-        )
-        comparison = _comparison_result(
-            baseline_snapshot,
-            candidate_snapshot,
-            visual,
-        )
-        return write_verification_run(
-            verdict,
-            facts,
-            visual,
-            output_dir,
-            comparison=comparison,
-            frozen_policy=frozen_policy,
-        )
+        with _visual_output_transaction(output_root, enabled=options.visual):
+            visual = _visual_comparison(
+                baseline_snapshot,
+                candidate_snapshot,
+                output_root,
+                options,
+            )
+            facts = diff_contracts(baseline_contract, candidate_contract)
+            verdict = evaluate_contract(
+                frozen_policy,
+                baseline_contract,
+                candidate_contract,
+                facts,
+                visual.visual_changes,
+                visual.available,
+            )
+            comparison = _comparison_result(
+                baseline_snapshot,
+                candidate_snapshot,
+                visual,
+            )
+            return write_verification_run(
+                verdict,
+                facts,
+                visual,
+                output_root,
+                comparison=comparison,
+                frozen_policy=frozen_policy,
+            )
 
 
 def _visual_comparison(
@@ -157,3 +180,49 @@ def _descriptor(snapshot: DocumentSnapshot) -> SourceDescriptor:
 
 def _deduplicate(warnings: list[str]) -> list[str]:
     return list(dict.fromkeys(warnings))
+
+
+@contextmanager
+def _verification_output_lock(output_root: Path) -> Iterator[None]:
+    output_root.mkdir(parents=True, exist_ok=True)
+    lock = output_root / ".artifactdiff-verification.lock"
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        if lock.is_symlink():
+            raise InputValidationError("verification output lock must not be a symlink") from None
+        raise InputValidationError("verification output is locked") from None
+    try:
+        yield
+    finally:
+        lock.rmdir()
+
+
+@contextmanager
+def _visual_output_transaction(output_root: Path, *, enabled: bool) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+
+    visual_root = output_root / "visual"
+    if visual_root.is_symlink() or (visual_root.exists() and not visual_root.is_dir()):
+        yield
+        return
+
+    backup: Path | None = None
+    if visual_root.is_dir():
+        backup = Path(mkdtemp(prefix=".artifactdiff-visual-backup.", dir=output_root))
+        backup.rmdir()
+        visual_root.replace(backup)
+    try:
+        yield
+    except BaseException:
+        if visual_root.is_dir() and not visual_root.is_symlink():
+            rmtree(visual_root)
+        if backup is not None:
+            backup.replace(visual_root)
+            backup = None
+        raise
+    else:
+        if backup is not None:
+            rmtree(backup)

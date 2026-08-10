@@ -1,6 +1,8 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 
 import pytest
 from PIL import Image
@@ -9,6 +11,7 @@ from artifactdiff.contract import ClauseSelector, load_contract
 from artifactdiff.errors import InputValidationError
 from artifactdiff.formats import adapter_for as real_adapter_for
 from artifactdiff.models import ContentType, DocumentSnapshot, PageSnapshot
+from artifactdiff.normalize import sha256_file
 from artifactdiff.policy import draft_exact_replace_policy, freeze_policy
 from artifactdiff.verification.models import FindingOutcome
 from artifactdiff.verification.service import VerificationOptions, verify_contract_change
@@ -19,8 +22,9 @@ from tests.factories import make_contract_docx, make_contract_pdf
 class _RenderedEvidenceAdapter:
     """Preserve real parsing while supplying deterministic render evidence in tests."""
 
-    def __init__(self, wrapped: object) -> None:
+    def __init__(self, wrapped: object, *, color: str = "white") -> None:
         self.wrapped = wrapped
+        self.color = color
 
     def load(
         self, path: Path, *, render: bool, workdir: Path, force: bool = False
@@ -40,7 +44,7 @@ class _RenderedEvidenceAdapter:
             return snapshot
         image = workdir / "test-render" / "page.png"
         image.parent.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", (120, 80), "white").save(image)
+        Image.new("RGB", (120, 80), self.color).save(image)
         return snapshot.model_copy(
             update={
                 "pages": [
@@ -61,6 +65,18 @@ def _rendering_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "artifactdiff.contract.service.adapter_for",
         lambda path: _RenderedEvidenceAdapter(real_adapter_for(path)),
+    )
+
+
+def _colored_rendering_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+    colors: dict[tuple[str, str], str],
+) -> None:
+    monkeypatch.setattr(
+        "artifactdiff.contract.service.adapter_for",
+        lambda path: _RenderedEvidenceAdapter(
+            real_adapter_for(path), color=colors[(path.parent.name, path.stem)]
+        ),
     )
 
 
@@ -298,3 +314,230 @@ def test_visual_verification_replaces_current_assets_when_output_is_reused(
         for path in (assets.before_image, assets.after_image, assets.heatmap_image)
     )
     assert not [path for path in (output / "visual").iterdir() if path.name.startswith(".")]
+
+
+def test_verification_lock_covers_visual_assets_through_report_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    colors = {
+        ("writer-a", "baseline"): "white",
+        ("writer-a", "candidate"): "black",
+        ("writer-b", "baseline"): "red",
+        ("writer-b", "candidate"): "blue",
+    }
+    _colored_rendering_adapters(monkeypatch, colors)
+    first_root = tmp_path / "writer-a"
+    second_root = tmp_path / "writer-b"
+    first_root.mkdir()
+    second_root.mkdir()
+    first_baseline, first_candidate, first_frozen = contract_edit_fixture(
+        first_root, "pdf", "pdf", 30, 45
+    )
+    second_baseline, second_candidate, second_frozen = contract_edit_fixture(
+        second_root, "pdf", "pdf", 60, 75
+    )
+    output = tmp_path / "out"
+    report_ready = Event()
+    release_report = Event()
+    lock_observations: list[bool] = []
+
+    from artifactdiff.verification import service as verification_service
+
+    real_write = verification_service.write_verification_run
+    paused = False
+
+    def pause_first_report(*args: object, **kwargs: object) -> object:
+        nonlocal paused
+        if not paused:
+            paused = True
+            lock_observations.append((output / ".artifactdiff-verification.lock").is_dir())
+            report_ready.set()
+            if not release_report.wait(timeout=10):
+                raise RuntimeError("timed out waiting to commit first report")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(verification_service, "write_verification_run", pause_first_report)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    first_writer = executor.submit(
+        verify_contract_change,
+        first_baseline,
+        first_candidate,
+        first_frozen,
+        output,
+        options=VerificationOptions(),
+    )
+    try:
+        assert report_ready.wait(timeout=10)
+        second_blocked = False
+        try:
+            verify_contract_change(
+                second_baseline,
+                second_candidate,
+                second_frozen,
+                output,
+                options=VerificationOptions(),
+            )
+        except InputValidationError as error:
+            second_blocked = True
+            assert str(error) == "verification output is locked"
+    finally:
+        release_report.set()
+        executor.shutdown(wait=True)
+
+    first_writer.result(timeout=10)
+    payload = json.loads((output / "verification.json").read_text(encoding="utf-8"))
+    assert payload["sources"]["candidate"]["sha256"] == sha256_file(first_candidate)
+    with Image.open(output / "visual" / "page-1-1" / "before.png") as before_image:
+        assert before_image.getpixel((0, 0)) == (255, 255, 255)
+    with Image.open(output / "visual" / "page-1-1" / "after.png") as after_image:
+        assert after_image.getpixel((0, 0)) == (0, 0, 0)
+    assert second_blocked is True
+    assert lock_observations == [True]
+    assert not (output / ".artifactdiff-verification.lock").exists()
+    assert not (output / ".artifactdiff-visual.lock").exists()
+
+
+@pytest.mark.parametrize("lock_kind", ["directory", "symlink"])
+def test_existing_verification_lock_fails_closed_without_deleting_it(
+    tmp_path: Path, lock_kind: str
+) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    output.mkdir()
+    lock = output / ".artifactdiff-verification.lock"
+    outside = tmp_path / "outside-lock"
+    if lock_kind == "directory":
+        lock.mkdir()
+    else:
+        outside.mkdir()
+        try:
+            lock.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks are unavailable in this test environment")
+
+    with pytest.raises(InputValidationError, match="verification output (?:is locked|lock)"):
+        verify_contract_change(
+            baseline,
+            candidate,
+            frozen,
+            output,
+            options=VerificationOptions(visual=False),
+        )
+
+    assert lock.is_dir()
+    assert lock.is_symlink() is (lock_kind == "symlink")
+    assert not (output / "verification.json").exists()
+
+
+@pytest.mark.parametrize(
+    "failure_stage", ["contract load", "visual generation", "evaluation", "report commit"]
+)
+def test_failed_verification_restores_complete_output_and_releases_owned_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    colors = {
+        ("existing", "baseline"): "white",
+        ("existing", "candidate"): "black",
+        ("failing", "baseline"): "red",
+        ("failing", "candidate"): "blue",
+    }
+    _colored_rendering_adapters(monkeypatch, colors)
+    existing_root = tmp_path / "existing"
+    failing_root = tmp_path / "failing"
+    existing_root.mkdir()
+    failing_root.mkdir()
+    existing_baseline, existing_candidate, existing_frozen = contract_edit_fixture(
+        existing_root, "pdf", "pdf", 30, 45
+    )
+    failing_baseline, failing_candidate, failing_frozen = contract_edit_fixture(
+        failing_root, "pdf", "pdf", 60, 75
+    )
+    output = tmp_path / "out"
+    verify_contract_change(
+        existing_baseline,
+        existing_candidate,
+        existing_frozen,
+        output,
+        options=VerificationOptions(),
+    )
+    complete_output = {
+        path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()
+    }
+    lock = output / ".artifactdiff-verification.lock"
+    lock_observations: list[bool] = []
+
+    from artifactdiff.verification import service as verification_service
+
+    def fail_stage(*_args: object, **_kwargs: object) -> object:
+        lock_observations.append(lock.is_dir())
+        raise RuntimeError(f"{failure_stage} failed")
+
+    with monkeypatch.context() as failure:
+        if failure_stage == "contract load":
+            failure.setattr(verification_service, "load_contract", fail_stage)
+        elif failure_stage == "visual generation":
+            failure.setattr(verification_service, "compare_visual_pages", fail_stage)
+        elif failure_stage == "evaluation":
+            failure.setattr(verification_service, "evaluate_contract", fail_stage)
+        else:
+            real_replace = Path.replace
+
+            def fail_report_replace(source: Path, destination: Path) -> Path:
+                if destination == output.resolve() / "verification.json":
+                    lock_observations.append(lock.is_dir())
+                    raise OSError(f"{failure_stage} failed")
+                return real_replace(source, destination)
+
+            failure.setattr(Path, "replace", fail_report_replace)
+
+        with pytest.raises((RuntimeError, OSError), match=f"{failure_stage} failed"):
+            verify_contract_change(
+                failing_baseline,
+                failing_candidate,
+                failing_frozen,
+                output,
+                options=VerificationOptions(),
+            )
+
+    assert {
+        path.relative_to(output): path.read_bytes() for path in output.rglob("*") if path.is_file()
+    } == complete_output
+    assert lock_observations == [True]
+    assert not lock.exists()
+    assert not lock.is_symlink()
+
+    clean_run = verify_contract_change(
+        failing_baseline,
+        failing_candidate,
+        failing_frozen,
+        output,
+        options=VerificationOptions(),
+    )
+    clean_payload = json.loads(clean_run.json_path.read_text(encoding="utf-8"))
+    assert clean_payload["sources"]["candidate"]["sha256"] == sha256_file(failing_candidate)
+    assert not lock.exists()
+
+
+def test_equivalent_output_path_spellings_contend_on_one_verification_lock(
+    tmp_path: Path,
+) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    output.mkdir()
+    lock = output / ".artifactdiff-verification.lock"
+    lock.mkdir()
+    equivalent_output = output / "unused-component" / ".."
+    assert equivalent_output.resolve() == output.resolve()
+
+    with pytest.raises(InputValidationError, match="locked"):
+        verify_contract_change(
+            baseline,
+            candidate,
+            frozen,
+            equivalent_output,
+            options=VerificationOptions(visual=False),
+        )
+
+    assert lock.is_dir()
+    assert not (output / "verification.json").exists()
