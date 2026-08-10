@@ -225,6 +225,49 @@ def test_unpaired_page_without_render_remains_directional_but_is_unavailable(
     assert visual.changed_pixel_ratio == 0.0
 
 
+@pytest.mark.parametrize("render_state", ["missing", "corrupt"])
+def test_unpaired_unreadable_render_remains_directional_but_is_unavailable(
+    tmp_path: Path, render_state: str
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    rendered = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Cover", "Deleted appendix"],
+        render=True,
+    )
+    unreadable = tmp_path / "unreadable.png"
+    if render_state == "corrupt":
+        unreadable.write_bytes(b"not a PNG")
+    left = rendered.model_copy(
+        update={
+            "pages": [
+                rendered.pages[0],
+                rendered.pages[1].model_copy(update={"render_path": str(unreadable)}),
+            ]
+        }
+    )
+    right = _snapshot(after, tmp_path / "after", texts=["Cover"], render=True)
+
+    visual = compare_visual_pages(
+        left,
+        right,
+        tmp_path / "output",
+        pixel_threshold=16,
+        tile_size=32,
+        include_unpaired=True,
+    )
+
+    assert visual.available is False
+    assert [(change.before_page, change.after_page) for change in visual.visual_changes] == [
+        (2, None)
+    ]
+    assert visual.changed_pixel_ratio == 0.0
+    assert visual.warnings == [
+        "Visual comparison unavailable for unpaired before page 2: rendered page unavailable"
+    ]
+
+
 @pytest.mark.parametrize(
     ("after_color", "expected_status", "expected_ratio"),
     [("black", "changed", 1.0), ("white", "unchanged", 0.0)],
@@ -382,6 +425,87 @@ def test_visual_assets_reject_symlinked_destination_without_writing_outside(
         )
 
     assert list(outside.iterdir()) == []
+
+
+def test_failed_visual_staging_preserves_preexisting_visual_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    left = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Revenue 100"],
+        render=True,
+        colors=["white"],
+    )
+    right = _snapshot(
+        after,
+        tmp_path / "after",
+        texts=["Revenue 101"],
+        render=True,
+        colors=["black"],
+    )
+    visual_root = tmp_path / "output" / "visual"
+    visual_root.mkdir(parents=True)
+    copies = 0
+
+    def copy_then_fail(source: Path, destination: Path) -> Path:
+        nonlocal copies
+        copies += 1
+        if copies == 2:
+            raise OSError("copy unavailable")
+        return copy2(source, destination)
+
+    monkeypatch.setattr("artifactdiff.visual_service.copy2", copy_then_fail)
+
+    with pytest.raises(OSError, match="copy unavailable"):
+        compare_visual_pages(left, right, tmp_path / "output", pixel_threshold=16, tile_size=32)
+
+    assert visual_root.is_dir()
+    assert list(visual_root.iterdir()) == []
+
+
+def test_failed_visual_replacement_restores_existing_page_assets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    left = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Revenue 100"],
+        render=True,
+        colors=["white"],
+    )
+    right = _snapshot(
+        after,
+        tmp_path / "after",
+        texts=["Revenue 101"],
+        render=True,
+        colors=["black"],
+    )
+    output = tmp_path / "output"
+    first = compare_visual_pages(left, right, output, pixel_threshold=16, tile_size=32)
+    original = first.assets["page-1-1"].before_image.read_bytes()
+    replace = Path.replace
+    staging_replacements = 0
+
+    def fail_staging_replace(source: Path, destination: Path) -> Path:
+        nonlocal staging_replacements
+        if source.name.startswith(".page-1-1.") and destination.name == "page-1-1":
+            staging_replacements += 1
+            if staging_replacements == 1:
+                raise OSError("replacement unavailable")
+        return replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_staging_replace)
+
+    with pytest.raises(OSError, match="replacement unavailable"):
+        compare_visual_pages(left, right, output, pixel_threshold=16, tile_size=32)
+
+    restored = output / "visual" / "page-1-1"
+    assert restored.is_dir()
+    assert (restored / "before.png").read_bytes() == original
+    assert not [path for path in (output / "visual").iterdir() if path.name.startswith(".")]
 
 
 def test_duplicate_snapshot_render_warnings_are_deduplicated(

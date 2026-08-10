@@ -74,9 +74,18 @@ def compare_visual_pages(
                     )
                     available = False
                 else:
-                    area = _image_area(Path(surviving.render_path))
-                    compared_pixels += area
-                    weighted_changed_pixels += area
+                    try:
+                        area = _image_area(Path(surviving.render_path))
+                    except OSError:
+                        warnings.append(
+                            "Visual comparison unavailable for "
+                            f"unpaired {'before' if left is not None else 'after'} "
+                            f"page {surviving.index + 1}: rendered page unavailable"
+                        )
+                        available = False
+                    else:
+                        compared_pixels += area
+                        weighted_changed_pixels += area
             continue
         if left.render_path is None or right.render_path is None:
             warnings.append(
@@ -132,12 +141,14 @@ def _copy_visual_assets(assets: VisualAssets, destination: Path) -> VisualAssets
     visual_root = destination.parent
     if visual_root.is_symlink() or destination.is_symlink():
         raise InputValidationError("visual artifact destination must not be a symlink")
+    visual_root_created = not visual_root.exists()
     visual_root.mkdir(parents=True, exist_ok=True)
     if visual_root.is_symlink():
         raise InputValidationError("visual artifact destination must not be a symlink")
-    if destination.exists():
-        raise InputValidationError("visual artifact destination already exists")
+    if destination.exists() and not destination.is_dir():
+        raise InputValidationError("visual artifact destination must be a directory")
     staging = Path(mkdtemp(prefix=f".{destination.name}.", dir=visual_root))
+    backup: Path | None = None
     copied = VisualAssets(
         before_image=staging / "before.png",
         after_image=staging / "after.png",
@@ -147,13 +158,21 @@ def _copy_visual_assets(assets: VisualAssets, destination: Path) -> VisualAssets
         copy2(assets.before_image, copied.before_image)
         copy2(assets.after_image, copied.after_image)
         copy2(assets.heatmap_image, copied.heatmap_image)
+        if destination.exists():
+            backup = Path(mkdtemp(prefix=f".{destination.name}.", dir=visual_root))
+            backup.rmdir()
+            destination.replace(backup)
         staging.replace(destination)
+        if backup is not None:
+            rmtree(backup)
+            backup = None
     except OSError:
-        rmtree(staging)
-        try:
+        if staging.exists():
+            rmtree(staging)
+        if backup is not None and backup.exists() and not destination.exists():
+            backup.replace(destination)
+        if visual_root_created:
             visual_root.rmdir()
-        except OSError:
-            pass
         raise
     return VisualAssets(
         before_image=destination / "before.png",

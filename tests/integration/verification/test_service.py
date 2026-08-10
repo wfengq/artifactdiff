@@ -275,3 +275,26 @@ def test_verification_uses_unique_temp_files_without_following_legacy_temp_symli
     assert legacy_temp.is_symlink()
     assert len(sources) == 2
     assert len(set(sources)) == 2
+
+
+def test_visual_verification_replaces_current_assets_when_output_is_reused(
+    tmp_path: Path,
+) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+
+    first = verify_contract_change(
+        baseline, candidate, frozen, output, options=VerificationOptions()
+    )
+    second = verify_contract_change(
+        baseline, candidate, frozen, output, options=VerificationOptions()
+    )
+
+    assert second.json_path.is_file()
+    assert set(second.visual_assets) == set(first.visual_assets)
+    assert all(
+        path.is_file()
+        for assets in second.visual_assets.values()
+        for path in (assets.before_image, assets.after_image, assets.heatmap_image)
+    )
+    assert not [path for path in (output / "visual").iterdir() if path.name.startswith(".")]
