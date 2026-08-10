@@ -1,9 +1,13 @@
-"""Strict, portable facts describing observed contract changes."""
+"""Strict, portable facts and verdicts for contract verification."""
 
+from __future__ import annotations
+
+import hashlib
+import json
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import ConfigDict, Field, StrictStr, field_validator
+from pydantic import ConfigDict, Field, StrictBool, StrictStr, field_validator
 
 from artifactdiff.contract.models import (
     DocumentFeatureKind,
@@ -11,6 +15,7 @@ from artifactdiff.contract.models import (
     EvidenceRef,
     ProtectedRegionKind,
 )
+from artifactdiff.contract.selectors import SelectorResolutionStatus
 from artifactdiff.models import StrictModel
 
 
@@ -20,10 +25,39 @@ def _require_text(value: object) -> object:
     return value
 
 
+def _require_optional_text(value: object) -> object:
+    if value is None:
+        return value
+    return _require_text(value)
+
+
 def _require_ordered(value: object) -> object:
     if not isinstance(value, (list, tuple)):
         raise ValueError("collection must be ordered")  # noqa: TRY004
     return value
+
+
+MAX_EVIDENCE_EXCERPT_CHARACTERS = 512
+MAX_FINDING_TEXT_CHARACTERS = 512
+MAX_FINDING_LOCATIONS = 32
+MAX_VERDICT_FINDINGS = 1_000
+
+
+def finding_id(
+    *,
+    rule_id: str,
+    rule_version: str,
+    location: str,
+    before_fingerprint: str | None,
+    after_fingerprint: str | None,
+) -> str:
+    """Hash the stable identity of one finding into its public identifier."""
+    raw = json.dumps(
+        [rule_id, rule_version, location, before_fingerprint, after_fingerprint],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"finding-{hashlib.sha256(raw).hexdigest()[:24]}"
 
 
 class FactModel(StrictModel):
@@ -103,3 +137,63 @@ class ContractChangeSet(FactModel):
         "unresolved_clause_ids",
         mode="before",
     )(_require_ordered)
+
+
+class FindingOutcome(StrEnum):
+    PASS = "pass"
+    REVIEW = "review"
+    FAIL = "fail"
+
+
+class FindingEvidence(FactModel):
+    before_fingerprint: StrictStr | None = Field(default=None, max_length=128)
+    after_fingerprint: StrictStr | None = Field(default=None, max_length=128)
+    before_excerpt: StrictStr | None = Field(
+        default=None, max_length=MAX_EVIDENCE_EXCERPT_CHARACTERS
+    )
+    after_excerpt: StrictStr | None = Field(
+        default=None, max_length=MAX_EVIDENCE_EXCERPT_CHARACTERS
+    )
+    locations: list[EvidenceRef] = Field(default_factory=list, max_length=MAX_FINDING_LOCATIONS)
+
+    _locations_are_ordered = field_validator("locations", mode="before")(_require_ordered)
+
+
+class Finding(FactModel):
+    id: StrictStr = Field(pattern=r"^finding-[0-9a-f]{24}$")
+    rule_id: StrictStr = Field(min_length=1, max_length=128)
+    rule_version: Literal["1.0"] = "1.0"
+    outcome: FindingOutcome
+    location: StrictStr = Field(min_length=1, max_length=MAX_FINDING_TEXT_CHARACTERS)
+    selector_status: SelectorResolutionStatus | None = None
+    evidence: FindingEvidence
+    remediation: StrictStr = Field(min_length=1, max_length=MAX_FINDING_TEXT_CHARACTERS)
+    approvable: StrictBool = False
+
+    _labels_are_text = field_validator("rule_id", "rule_version", "outcome", mode="before")(
+        _require_text
+    )
+    _selector_status_is_optional_text = field_validator("selector_status", mode="before")(
+        _require_optional_text
+    )
+
+
+class RawVerdict(FactModel):
+    schema_version: Literal["1.0"] = "1.0"
+    outcome: FindingOutcome
+    policy_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    candidate_sha256: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    findings: list[Finding] = Field(max_length=MAX_VERDICT_FINDINGS)
+
+    _labels_are_text = field_validator("schema_version", "outcome", mode="before")(_require_text)
+    _findings_are_ordered = field_validator("findings", mode="before")(_require_ordered)
+
+    def canonical_bytes(self) -> bytes:
+        """Serialize deterministic UTF-8 JSON for later reporting."""
+        return json.dumps(
+            self.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
