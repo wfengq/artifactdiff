@@ -6,11 +6,13 @@ import pytest
 from PIL import Image
 
 from artifactdiff.contract import ClauseSelector, load_contract
+from artifactdiff.errors import InputValidationError
 from artifactdiff.formats import adapter_for as real_adapter_for
 from artifactdiff.models import ContentType, DocumentSnapshot, PageSnapshot
 from artifactdiff.policy import draft_exact_replace_policy, freeze_policy
 from artifactdiff.verification.models import FindingOutcome
 from artifactdiff.verification.service import VerificationOptions, verify_contract_change
+from artifactdiff.visual_service import VisualComparison
 from tests.factories import make_contract_docx, make_contract_pdf
 
 
@@ -158,6 +160,44 @@ def test_verification_json_is_deterministic_across_output_roots(
     assert b"artifactdiff-verify-" not in first.json_path.read_bytes()
 
 
+def test_verification_normalizes_temporary_paths_in_public_warnings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _rendering_adapters(monkeypatch)
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    warnings = iter(
+        [
+            (
+                "Visual comparison unavailable: "
+                "C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\artifactdiff-verify-a1b2\\baseline\\page.png"
+            ),
+            (
+                "Visual comparison unavailable: "
+                "C:\\Users\\wei\\AppData\\Local\\Temp\\artifactdiff-verify-z9y8\\baseline\\page.png"
+            ),
+        ]
+    )
+
+    def unavailable_visual(*_args: object, **_kwargs: object) -> VisualComparison:
+        return VisualComparison([], {}, [next(warnings)], 0.0, False)
+
+    monkeypatch.setattr(
+        "artifactdiff.verification.service.compare_visual_pages", unavailable_visual
+    )
+    first = verify_contract_change(
+        baseline, candidate, frozen, tmp_path / "first", options=VerificationOptions()
+    )
+    second = verify_contract_change(
+        baseline, candidate, frozen, tmp_path / "second", options=VerificationOptions()
+    )
+
+    first_payload = json.loads(first.json_path.read_text(encoding="utf-8"))
+    assert first.json_path.read_bytes() == second.json_path.read_bytes()
+    assert first_payload["warnings"] == ["Visual comparison unavailable: <temporary>"]
+    assert first_payload["comparison"]["warnings"] == first_payload["warnings"]
+    assert b"artifactdiff-verify-" not in first.json_path.read_bytes()
+
+
 def test_verification_removes_temporary_json_on_atomic_rename_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -176,3 +216,62 @@ def test_verification_removes_temporary_json_on_atomic_rename_failure(
 
     assert not (tmp_path / "out" / "verification.json").exists()
     assert not list((tmp_path / "out").glob("*.tmp"))
+
+
+def test_verification_rejects_symlinked_report_destination(tmp_path: Path) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    output.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("sentinel", encoding="utf-8")
+    try:
+        (output / "verification.json").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable in this test environment")
+
+    with pytest.raises(InputValidationError, match="symlink"):
+        verify_contract_change(
+            baseline,
+            candidate,
+            frozen,
+            output,
+            options=VerificationOptions(visual=False),
+        )
+
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+
+
+def test_verification_uses_unique_temp_files_without_following_legacy_temp_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    output = tmp_path / "out"
+    output.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("sentinel", encoding="utf-8")
+    try:
+        legacy_temp = output / "verification.json.tmp"
+        legacy_temp.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable in this test environment")
+    original_replace = Path.replace
+    sources: list[str] = []
+
+    def record_replace(source: Path, destination: Path) -> Path:
+        sources.append(source.name)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", record_replace)
+    for _ in range(2):
+        verify_contract_change(
+            baseline,
+            candidate,
+            frozen,
+            output,
+            options=VerificationOptions(visual=False),
+        )
+
+    assert outside.read_text(encoding="utf-8") == "sentinel"
+    assert legacy_temp.is_symlink()
+    assert len(sources) == 2
+    assert len(set(sources)) == 2

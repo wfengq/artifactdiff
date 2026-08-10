@@ -1,4 +1,5 @@
 from pathlib import Path
+from shutil import copy2
 from unittest.mock import Mock
 
 import pytest
@@ -184,8 +185,44 @@ def test_visual_page_service_preserves_unpaired_direction_when_requested(
         (change.before_page, change.after_page, change.changed_pixel_ratio)
         for change in visual.visual_changes
     ] == [(2, None, 1.0)]
-    assert visual.changed_pixel_ratio == 0.0
+    assert visual.changed_pixel_ratio == pytest.approx(2 / 3)
     assert not (tmp_path / "output" / "work").exists()
+
+
+def test_unpaired_page_without_render_remains_directional_but_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    rendered = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Cover", "Deleted appendix"],
+        render=True,
+    )
+    left = rendered.model_copy(
+        update={
+            "pages": [
+                rendered.pages[0],
+                rendered.pages[1].model_copy(update={"render_path": None}),
+            ]
+        }
+    )
+    right = _snapshot(after, tmp_path / "after", texts=["Cover"], render=True)
+
+    visual = compare_visual_pages(
+        left,
+        right,
+        tmp_path / "output",
+        pixel_threshold=16,
+        tile_size=32,
+        include_unpaired=True,
+    )
+
+    assert visual.available is False
+    assert [(change.before_page, change.after_page) for change in visual.visual_changes] == [
+        (2, None)
+    ]
+    assert visual.changed_pixel_ratio == 0.0
 
 
 @pytest.mark.parametrize(
@@ -260,6 +297,91 @@ def test_visual_failure_returns_partial_semantic_result(
     assert run.result.summary.total_changes == 1
     assert run.result.visual_changes == []
     assert run.result.warnings == ["Visual comparison unavailable: renderer stopped"]
+
+
+def test_visual_asset_area_failure_propagates_instead_of_degrading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    adapter = FakeAdapter(
+        texts={"before.pdf": ["Revenue 100"], "after.pdf": ["Revenue 101"]},
+        colors={"before.pdf": ["white"], "after.pdf": ["black"]},
+    )
+    monkeypatch.setattr("artifactdiff.formats.base.adapter_for", lambda _: adapter)
+    monkeypatch.setattr(
+        "artifactdiff.visual_service._image_area",
+        Mock(side_effect=OSError("area unavailable")),
+    )
+
+    with pytest.raises(OSError, match="area unavailable"):
+        compare_documents(before, after, tmp_path / "report", options=CompareOptions())
+
+    assert not (tmp_path / "report" / "visual").exists()
+
+
+def test_visual_asset_copy_failure_propagates_and_removes_incomplete_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    adapter = FakeAdapter(
+        texts={"before.pdf": ["Revenue 100"], "after.pdf": ["Revenue 101"]},
+        colors={"before.pdf": ["white"], "after.pdf": ["black"]},
+    )
+    monkeypatch.setattr("artifactdiff.formats.base.adapter_for", lambda _: adapter)
+    copies = 0
+
+    def copy_then_fail(source: Path, destination: Path) -> Path:
+        nonlocal copies
+        copies += 1
+        if copies == 2:
+            raise OSError("copy unavailable")
+        return copy2(source, destination)
+
+    monkeypatch.setattr("artifactdiff.visual_service.copy2", copy_then_fail)
+
+    with pytest.raises(OSError, match="copy unavailable"):
+        compare_documents(before, after, tmp_path / "report", options=CompareOptions())
+
+    assert not (tmp_path / "report" / "visual").exists()
+
+
+def test_visual_assets_reject_symlinked_destination_without_writing_outside(
+    tmp_path: Path,
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    left = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Revenue 100"],
+        render=True,
+        colors=["white"],
+    )
+    right = _snapshot(
+        after,
+        tmp_path / "after",
+        texts=["Revenue 101"],
+        render=True,
+        colors=["black"],
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (output / "visual").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable in this test environment")
+
+    with pytest.raises(InputValidationError, match="symlink"):
+        compare_visual_pages(
+            left,
+            right,
+            output,
+            pixel_threshold=16,
+            tile_size=32,
+        )
+
+    assert list(outside.iterdir()) == []
 
 
 def test_duplicate_snapshot_render_warnings_are_deduplicated(
