@@ -72,3 +72,50 @@ and link payloads are not copied into findings.  Page deletion is deliberately
 not a policy relaxation: it always fails, while candidate page additions and
 authorized-edit reflow continue to follow `pagination_reflow`.  No remaining
 Task 4 concerns were identified.
+
+## Fix round 1
+
+### Root cause and scope
+
+The prior visual helper reduced all expected rendered boxes to one enclosing
+rectangle.  That filled the gap between disjoint semantic evidence boxes and
+implicitly authorized a visual change in the gap.  The integrity boundary also
+accessed `baseline.source` and `candidate.source` before revalidating documents,
+so dictionaries and unsafe `model_copy(update={"source": None})` instances
+raised `AttributeError` instead of yielding a fail-closed verdict.
+
+### TDD RED/GREEN
+
+- RED: `.venv\\Scripts\\python.exe -m pytest tests/unit/verification/test_rules.py::test_disjoint_expected_evidence_does_not_authorize_the_gap_between_boxes tests/unit/verification/test_rules.py::test_malformed_contract_documents_fail_integrity_without_raising -q`
+  - Output: `5 failed in 0.75s`.  The gap change incorrectly produced `PASS`;
+    dict and unsafe baseline/candidate inputs raised `AttributeError` at
+    unvalidated `.source` access.
+- GREEN: `.venv\\Scripts\\python.exe -m pytest tests/unit/verification/test_rules.py::test_disjoint_expected_evidence_does_not_authorize_the_gap_between_boxes tests/unit/verification/test_rules.py::test_visual_envelope_unions_before_and_after_rendered_boxes tests/unit/verification/test_rules.py::test_malformed_contract_documents_fail_integrity_without_raising -q`
+  - Output: `6 passed in 0.43s`.
+
+### Changes and self-review
+
+- `src/artifactdiff/verification/visual_rules.py`: retain a sorted discrete
+  union of expected boxes and pass only when the whole changed region is inside
+  one actual padded evidence box; gaps now review.
+- `src/artifactdiff/verification/rules.py`: validate baseline and candidate
+  documents before every integrity comparison or fact recomputation, and use
+  only the validated instances afterwards.
+- `tests/unit/verification/test_rules.py`: cover disjoint evidence gap review,
+  a valid actual-box pass, and both dict/unsafe malformed baseline and candidate
+  inputs with deterministic, non-approvable integrity failures.
+
+This deliberately does not address the deferred Minor concerning the tracked
+report.  The discrete per-box treatment is intentionally conservative: a region
+that spans separate boxes reviews instead of gaining implicit authorization.
+
+### Verification
+
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/verification/test_rules.py tests/unit/verification/test_visual_rules.py -q` — `52 passed in 0.45s`.
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/verification -q` — `88 passed in 0.45s`.
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/contract tests/integration/contract tests/unit/policy tests/integration/policy tests/unit/verification -q` — `418 passed in 8.31s`.
+- `.venv\\Scripts\\python.exe -m pytest -q` — `532 passed in 11.70s`.
+- `.venv\\Scripts\\ruff.exe check src/artifactdiff/verification tests/unit/verification` — clean.
+- `.venv\\Scripts\\ruff.exe format --check src/artifactdiff/verification tests/unit/verification` — `8 files already formatted`.
+- `.venv\\Scripts\\mypy.exe src/artifactdiff/contract src/artifactdiff/policy src/artifactdiff/verification` — `Success: no issues found in 20 source files`.
+- `git diff --check` — clean.

@@ -71,17 +71,9 @@ def expand_rect(rect: Rect, padding: float) -> Rect:
     )
 
 
-def union_rectangles(rectangles: Iterable[Rect]) -> Rect | None:
-    """Return the smallest rectangle containing every supplied box."""
-    items = list(rectangles)
-    if not items:
-        return None
-    return Rect(
-        x0=min(item.x0 for item in items),
-        y0=min(item.y0 for item in items),
-        x1=max(item.x1 for item in items),
-        y1=max(item.y1 for item in items),
-    )
+def union_rectangles(rectangles: Iterable[Rect]) -> tuple[Rect, ...]:
+    """Return a deterministic, discrete union without filling gaps between boxes."""
+    return tuple(sorted(rectangles, key=lambda item: (item.x0, item.y0, item.x1, item.y1)))
 
 
 def rect_contains(container: Rect, contained: Rect) -> bool:
@@ -102,6 +94,7 @@ def rects_overlap(left: Rect, right: Rect) -> bool:
 def assess_visual_change(
     *,
     expected_box: Rect | None,
+    expected_boxes: Sequence[Rect] | None = None,
     changed: Rect,
     padding: float,
     protected_boxes: list[Rect] | None = None,
@@ -109,9 +102,12 @@ def assess_visual_change(
     locations: Sequence[EvidenceRef] = (),
 ) -> Finding:
     """Assess one changed box against an expected envelope and protected boxes."""
-    expected_fingerprint = (
-        _fingerprint(_rect_payload(expected_box)) if expected_box is not None else None
+    boxes = (
+        tuple(expected_boxes)
+        if expected_boxes is not None
+        else ((expected_box,) if expected_box else ())
     )
+    expected_fingerprint = _fingerprint([_rect_payload(box) for box in boxes]) if boxes else None
     changed_fingerprint = _fingerprint(_rect_payload(changed))
     if any(rects_overlap(changed, protected) for protected in protected_boxes or []):
         return _finding(
@@ -123,7 +119,7 @@ def assess_visual_change(
             remediation="Restore the protected rendered region.",
             locations=locations,
         )
-    if expected_box is not None and rect_contains(expand_rect(expected_box, padding), changed):
+    if any(rect_contains(expand_rect(box, padding), changed) for box in boxes):
         return _finding(
             rule_id="contract-safe.visual.explained",
             outcome=FindingOutcome.PASS,

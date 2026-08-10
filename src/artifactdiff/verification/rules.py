@@ -163,16 +163,29 @@ def _ordered_facts(facts: ContractChangeSet) -> dict[str, object]:
     return payload
 
 
+def _validated_document(value: object) -> ContractDocument:
+    payload = value.model_dump() if isinstance(value, ContractDocument) else value
+    return ContractDocument.model_validate(payload)
+
+
 def _integrity_findings(
-    frozen: FrozenPolicy,
-    baseline: ContractDocument,
-    candidate: ContractDocument,
-    facts: ContractChangeSet,
+    frozen: object,
+    baseline: object,
+    candidate: object,
+    facts: object,
     visual_changes: Sequence[object],
     visual_available: bool,
-) -> tuple[FrozenPolicy | None, ContractChangeSet | None, list[Finding]]:
+) -> tuple[
+    FrozenPolicy | None,
+    ContractDocument | None,
+    ContractDocument | None,
+    ContractChangeSet | None,
+    list[Finding],
+]:
     findings: list[Finding] = []
     checked_frozen: FrozenPolicy | None = None
+    checked_baseline: ContractDocument | None = None
+    checked_candidate: ContractDocument | None = None
     checked_facts: ContractChangeSet | None = None
     try:
         checked_frozen = FrozenPolicy.model_validate(frozen)
@@ -183,6 +196,28 @@ def _integrity_findings(
                 outcome=FindingOutcome.FAIL,
                 location="integrity:policy-model",
                 remediation="Use a valid frozen policy.",
+            )
+        )
+    try:
+        checked_baseline = _validated_document(baseline)
+    except (AttributeError, ValidationError, RecursionError, TypeError, ValueError):
+        findings.append(
+            _make_finding(
+                rule_id="contract-safe.integrity.baseline-document",
+                outcome=FindingOutcome.FAIL,
+                location="integrity:baseline-document",
+                remediation="Use a valid inspected baseline contract document.",
+            )
+        )
+    try:
+        checked_candidate = _validated_document(candidate)
+    except (AttributeError, ValidationError, RecursionError, TypeError, ValueError):
+        findings.append(
+            _make_finding(
+                rule_id="contract-safe.integrity.candidate-document",
+                outcome=FindingOutcome.FAIL,
+                location="integrity:candidate-document",
+                remediation="Use a valid inspected candidate contract document.",
             )
         )
     if checked_frozen is not None:
@@ -198,9 +233,9 @@ def _integrity_findings(
                     remediation="Refreeze the policy from its canonical contents.",
                 )
             )
-        if (
-            checked_frozen.policy.baseline.sha256 != baseline.source.sha256
-            or checked_frozen.policy.baseline.format != baseline.source.format
+        if checked_baseline is not None and (
+            checked_frozen.policy.baseline.sha256 != checked_baseline.source.sha256
+            or checked_frozen.policy.baseline.format != checked_baseline.source.format
         ):
             findings.append(
                 _make_finding(
@@ -208,13 +243,13 @@ def _integrity_findings(
                     outcome=FindingOutcome.FAIL,
                     location="integrity:baseline",
                     before_fingerprint=checked_frozen.policy.baseline.sha256,
-                    after_fingerprint=_safe_sha(baseline.source.sha256),
+                    after_fingerprint=_safe_sha(checked_baseline.source.sha256),
                     remediation="Verify the exact frozen baseline artifact.",
                 )
             )
     try:
         checked_facts = ContractChangeSet.model_validate(facts)
-    except (ValidationError, RecursionError, TypeError, ValueError):
+    except (AttributeError, ValidationError, RecursionError, TypeError, ValueError):
         findings.append(
             _make_finding(
                 rule_id="contract-safe.integrity.facts",
@@ -224,50 +259,57 @@ def _integrity_findings(
             )
         )
     if checked_facts is not None:
-        if checked_facts.baseline_sha256 != baseline.source.sha256:
+        if (
+            checked_baseline is not None
+            and checked_facts.baseline_sha256 != checked_baseline.source.sha256
+        ):
             findings.append(
                 _make_finding(
                     rule_id="contract-safe.integrity.facts",
                     outcome=FindingOutcome.FAIL,
                     location="integrity:facts-baseline",
                     before_fingerprint=checked_facts.baseline_sha256,
-                    after_fingerprint=_safe_sha(baseline.source.sha256),
+                    after_fingerprint=_safe_sha(checked_baseline.source.sha256),
                     remediation="Recompute contract facts from this baseline.",
                 )
             )
-        if checked_facts.candidate_sha256 != candidate.source.sha256:
+        if (
+            checked_candidate is not None
+            and checked_facts.candidate_sha256 != checked_candidate.source.sha256
+        ):
             findings.append(
                 _make_finding(
                     rule_id="contract-safe.integrity.candidate",
                     outcome=FindingOutcome.FAIL,
                     location="integrity:facts-candidate",
                     before_fingerprint=checked_facts.candidate_sha256,
-                    after_fingerprint=_safe_sha(candidate.source.sha256),
+                    after_fingerprint=_safe_sha(checked_candidate.source.sha256),
                     remediation="Recompute contract facts from this candidate.",
                 )
             )
-        try:
-            recomputed = diff_contracts(baseline, candidate)
-            if _ordered_facts(checked_facts) != _ordered_facts(recomputed):
+        if checked_baseline is not None and checked_candidate is not None:
+            try:
+                recomputed = diff_contracts(checked_baseline, checked_candidate)
+                if _ordered_facts(checked_facts) != _ordered_facts(recomputed):
+                    findings.append(
+                        _make_finding(
+                            rule_id="contract-safe.integrity.facts",
+                            outcome=FindingOutcome.FAIL,
+                            location="integrity:facts-content",
+                            before_fingerprint=_digest(_ordered_facts(checked_facts)),
+                            after_fingerprint=_digest(_ordered_facts(recomputed)),
+                            remediation="Recompute unmodified contract facts.",
+                        )
+                    )
+            except (AttributeError, ValidationError, RecursionError, TypeError, ValueError):
                 findings.append(
                     _make_finding(
-                        rule_id="contract-safe.integrity.facts",
+                        rule_id="contract-safe.integrity.contracts",
                         outcome=FindingOutcome.FAIL,
-                        location="integrity:facts-content",
-                        before_fingerprint=_digest(_ordered_facts(checked_facts)),
-                        after_fingerprint=_digest(_ordered_facts(recomputed)),
-                        remediation="Recompute unmodified contract facts.",
+                        location="integrity:contract-models",
+                        remediation="Use valid inspected contract models.",
                     )
                 )
-        except (ValidationError, RecursionError, TypeError, ValueError):
-            findings.append(
-                _make_finding(
-                    rule_id="contract-safe.integrity.contracts",
-                    outcome=FindingOutcome.FAIL,
-                    location="integrity:contract-models",
-                    remediation="Use valid inspected contract models.",
-                )
-            )
     if not isinstance(visual_available, bool) or not isinstance(visual_changes, list):
         findings.append(
             _make_finding(
@@ -300,7 +342,7 @@ def _integrity_findings(
                     remediation="Recompute valid visual change facts.",
                 )
             )
-    return checked_frozen, checked_facts, findings
+    return checked_frozen, checked_baseline, checked_candidate, checked_facts, findings
 
 
 def _one_clause(document: ContractDocument, clause_id: str) -> ContractClause | None:
@@ -841,7 +883,9 @@ def _rendered_boxes(items: list[EvidenceRef], page: int) -> list[Rect]:
     ]
 
 
-def _expected_envelopes(assessments: list[_ExpectedAssessment], pages: set[int]) -> dict[int, Rect]:
+def _expected_envelopes(
+    assessments: list[_ExpectedAssessment], pages: set[int]
+) -> dict[int, tuple[Rect, ...]]:
     by_page: dict[int, list[Rect]] = {page: [] for page in pages}
     for assessment in assessments:
         if not assessment.applied:
@@ -850,9 +894,7 @@ def _expected_envelopes(assessments: list[_ExpectedAssessment], pages: set[int])
             by_page[page].extend(_rendered_boxes(assessment.before_clause.evidence, page))
             by_page[page].extend(_rendered_boxes(assessment.after_clause.evidence, page))
     return {
-        page: envelope
-        for page, boxes in by_page.items()
-        if (envelope := union_rectangles(boxes)) is not None
+        page: envelope for page, boxes in by_page.items() if (envelope := union_rectangles(boxes))
     }
 
 
@@ -931,7 +973,8 @@ def _visual_findings(
         for index, region in enumerate(ordered_regions):
             findings.append(
                 assess_visual_change(
-                    expected_box=envelopes.get(page),
+                    expected_box=None,
+                    expected_boxes=envelopes.get(page),
                     changed=region,
                     padding=frozen.policy.visual.layout_envelope_padding_points,
                     protected_boxes=protected.get(page, []),
@@ -1070,13 +1113,21 @@ def evaluate_contract(
     visual_available: bool,
 ) -> RawVerdict:
     """Evaluate observed facts using only the frozen contract-safe policy."""
-    checked_policy, checked_facts, integrity = _integrity_findings(
-        policy, baseline, candidate, facts, visual_changes, visual_available
+    checked_policy, checked_baseline, checked_candidate, checked_facts, integrity = (
+        _integrity_findings(policy, baseline, candidate, facts, visual_changes, visual_available)
     )
-    policy_sha = _safe_sha(getattr(policy, "canonical_sha256", ""))
-    baseline_sha = _safe_sha(getattr(getattr(baseline, "source", None), "sha256", ""))
-    candidate_sha = _safe_sha(getattr(getattr(candidate, "source", None), "sha256", ""))
-    if integrity or checked_policy is None or checked_facts is None:
+    policy_sha = checked_policy.canonical_sha256 if checked_policy is not None else _safe_sha("")
+    baseline_sha = checked_baseline.source.sha256 if checked_baseline is not None else _safe_sha("")
+    candidate_sha = (
+        checked_candidate.source.sha256 if checked_candidate is not None else _safe_sha("")
+    )
+    if (
+        integrity
+        or checked_policy is None
+        or checked_baseline is None
+        or checked_candidate is None
+        or checked_facts is None
+    ):
         findings = sorted(integrity, key=_phase_rank)
         return RawVerdict(
             outcome=FindingOutcome.FAIL,
@@ -1086,14 +1137,20 @@ def evaluate_contract(
             findings=findings,
         )
 
-    expected_findings, assessments, _ = _expected_phase(checked_policy, baseline, candidate)
-    allow_findings, allowed = _allow_phase(checked_policy, baseline, candidate)
+    expected_findings, assessments, _ = _expected_phase(
+        checked_policy, checked_baseline, checked_candidate
+    )
+    allow_findings, allowed = _allow_phase(checked_policy, checked_baseline, checked_candidate)
     findings = [*expected_findings, *allow_findings]
     findings.extend(
-        _protected_entity_findings(checked_policy, baseline, candidate, checked_facts, assessments)
+        _protected_entity_findings(
+            checked_policy, checked_baseline, checked_candidate, checked_facts, assessments
+        )
     )
     findings.extend(_protected_region_findings(checked_policy, checked_facts))
-    findings.extend(_feature_findings(checked_policy, baseline, candidate, checked_facts))
+    findings.extend(
+        _feature_findings(checked_policy, checked_baseline, checked_candidate, checked_facts)
+    )
     findings.extend(_clause_findings(checked_facts, assessments, allowed))
     availability = assess_visual_availability(
         policy=checked_policy.policy.visual, available=visual_available
@@ -1104,8 +1161,8 @@ def evaluate_contract(
         findings.extend(
             _visual_findings(
                 checked_policy,
-                baseline,
-                candidate,
+                checked_baseline,
+                checked_candidate,
                 assessments,
                 [VisualPageChange.model_validate(item) for item in visual_changes],
             )
@@ -1115,7 +1172,7 @@ def evaluate_contract(
     return RawVerdict(
         outcome=_combine(findings),
         policy_sha256=checked_policy.canonical_sha256,
-        baseline_sha256=baseline.source.sha256,
-        candidate_sha256=candidate.source.sha256,
+        baseline_sha256=checked_baseline.source.sha256,
+        candidate_sha256=checked_candidate.source.sha256,
         findings=findings,
     )

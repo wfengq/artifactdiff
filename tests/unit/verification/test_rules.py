@@ -753,7 +753,7 @@ def test_visual_envelope_unions_before_and_after_rendered_boxes() -> None:
         before_page=0,
         after_page=0,
         changed_pixel_ratio=0.1,
-        regions=[Rect(x0=4, y0=3, x1=88, y1=37)],
+        regions=[Rect(x0=6, y0=4, x1=86, y1=36)],
     )
 
     verdict = _evaluate(
@@ -765,6 +765,39 @@ def test_visual_envelope_unions_before_and_after_rendered_boxes() -> None:
 
     assert verdict.outcome is FindingOutcome.PASS
     assert any(item.rule_id == "contract-safe.visual.explained" for item in verdict.findings)
+
+
+def test_disjoint_expected_evidence_does_not_authorize_the_gap_between_boxes() -> None:
+    evidence = [
+        EvidenceRef(
+            block_id="payment-left",
+            rendered_page_index=0,
+            rendered_bbox=Rect(x0=10, y0=10, x1=20, y1=20),
+        ),
+        EvidenceRef(
+            block_id="payment-right",
+            rendered_page_index=0,
+            rendered_bbox=Rect(x0=80, y0=10, x1=90, y1=20),
+        ),
+    ]
+    baseline, candidate = _exact_pair(before_evidence=evidence, after_evidence=evidence)
+    gap = VisualPageChange(
+        id="gap",
+        before_page=0,
+        after_page=0,
+        changed_pixel_ratio=0.1,
+        regions=[Rect(x0=40, y0=10, x1=50, y1=20)],
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="30 days", after="45 days"),
+        visual_changes=[gap],
+    )
+
+    assert verdict.outcome is FindingOutcome.REVIEW
+    assert any(item.rule_id == "contract-safe.visual.outside-envelope" for item in verdict.findings)
 
 
 def test_visual_outside_envelope_reviews_approvably() -> None:
@@ -1099,6 +1132,47 @@ def test_tampered_fact_content_fails_even_when_source_hashes_match() -> None:
 
     assert verdict.outcome is FindingOutcome.FAIL
     assert [item.rule_id for item in verdict.findings] == ["contract-safe.integrity.facts"]
+
+
+@pytest.mark.parametrize("side", ["baseline", "candidate"])
+@pytest.mark.parametrize("unsafe", [False, True])
+def test_malformed_contract_documents_fail_integrity_without_raising(
+    side: Literal["baseline", "candidate"], unsafe: bool
+) -> None:
+    baseline, candidate = _exact_pair()
+    frozen = _frozen(baseline, before="30 days", after="45 days")
+    facts = diff_contracts(baseline, candidate)
+    malformed: object = (
+        baseline.model_copy(update={"source": None})
+        if side == "baseline"
+        else candidate.model_copy(update={"source": None})
+    )
+    if not unsafe:
+        malformed = {"source": None}
+    left = malformed if side == "baseline" else baseline
+    right = malformed if side == "candidate" else candidate
+
+    first = evaluate_contract(
+        frozen,
+        left,  # type: ignore[arg-type]
+        right,  # type: ignore[arg-type]
+        facts,
+        [],
+        True,
+    )
+    second = evaluate_contract(
+        frozen,
+        left,  # type: ignore[arg-type]
+        right,  # type: ignore[arg-type]
+        facts,
+        [],
+        True,
+    )
+
+    assert first.outcome is FindingOutcome.FAIL
+    assert [item.rule_id for item in first.findings] == [f"contract-safe.integrity.{side}-document"]
+    assert all(item.approvable is False for item in first.findings)
+    assert first.canonical_bytes() == second.canonical_bytes()
 
 
 def test_malformed_visual_fact_fails_integrity_instead_of_raising() -> None:
