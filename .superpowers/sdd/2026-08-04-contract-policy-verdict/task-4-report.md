@@ -119,3 +119,46 @@ that spans separate boxes reviews instead of gaining implicit authorization.
 - `.venv\\Scripts\\ruff.exe format --check src/artifactdiff/verification tests/unit/verification` — `8 files already formatted`.
 - `.venv\\Scripts\\mypy.exe src/artifactdiff/contract src/artifactdiff/policy src/artifactdiff/verification` — `Success: no issues found in 20 source files`.
 - `git diff --check` — clean.
+
+## Fix round 2
+
+### Root cause and scope
+
+Fix round 1 preserved disjoint evidence boxes but accepted a changed rectangle
+only when a single padded box contained it. This was fail-closed for gaps, but
+too conservative for rectangles wholly covered by the union of adjacent or
+overlapping authorized boxes.
+
+### TDD RED/GREEN
+
+- RED: `.venv\\Scripts\\python.exe -m pytest tests/unit/verification/test_visual_rules.py::test_visual_delta_covered_by_combined_boxes_passes_as_their_union -q`
+  - Output: `2 failed in 0.41s`; adjacent and overlapping box cases both
+    returned `contract-safe.visual.outside-envelope` review.
+- GREEN: `.venv\\Scripts\\python.exe -m pytest tests/unit/verification/test_visual_rules.py::test_visual_delta_covered_by_combined_boxes_passes_as_their_union tests/unit/verification/test_visual_rules.py::test_visual_delta_crossing_an_uncovered_gap_reviews tests/unit/verification/test_visual_rules.py::test_protected_overlap_takes_precedence_over_explained_envelope -q`
+  - Output: `4 passed in 0.34s`.
+
+### Changes and self-review
+
+- `src/artifactdiff/verification/visual_rules.py`: add an exact, deterministic
+  containment test for an axis-aligned changed rectangle against a union of at
+  most 128 padded axis-aligned boxes. The algorithm partitions the changed
+  rectangle at authorized x boundaries and verifies contiguous y coverage in
+  each strip; it uses no pixels and never fills an uncovered gap with an outer
+  bounding rectangle. Inputs above the fixed bound fail closed to review.
+- `tests/unit/verification/test_visual_rules.py`: cover adjacent and overlapping
+  union coverage pass, a real gap review, and protected-overlap fail precedence.
+
+The requested deferred report-tracking Minor remains untouched. The union check
+is conservative for invalid or degenerate rectangles and oversized envelope
+sets, both of which cannot silently pass.
+
+### Verification
+
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/verification/test_rules.py tests/unit/verification/test_visual_rules.py -q`: `55 passed in 0.46s`.
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/verification -q`: `91 passed in 0.50s`.
+- `.venv\\Scripts\\python.exe -m pytest tests/unit/contract tests/integration/contract tests/unit/policy tests/integration/policy tests/unit/verification -q`: `421 passed in 8.64s`.
+- `.venv\\Scripts\\python.exe -m pytest -q`: `535 passed in 11.96s`.
+- `.venv\\Scripts\\ruff.exe check src/artifactdiff/verification tests/unit/verification`: clean.
+- `.venv\\Scripts\\ruff.exe format --check src/artifactdiff/verification tests/unit/verification`: `8 files already formatted`.
+- `.venv\\Scripts\\mypy.exe src/artifactdiff/contract src/artifactdiff/policy src/artifactdiff/verification`: `Success: no issues found in 20 source files`.
+- `git diff --check`: clean.

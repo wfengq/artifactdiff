@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable, Sequence
+from itertools import pairwise
 
 from artifactdiff.contract.models import EvidenceRef
 from artifactdiff.models import Rect
@@ -15,6 +16,8 @@ from artifactdiff.verification.models import (
     FindingOutcome,
     finding_id,
 )
+
+MAX_UNION_CONTAINMENT_BOXES = 128
 
 
 def _rect_payload(rect: Rect) -> list[float]:
@@ -91,6 +94,42 @@ def rects_overlap(left: Rect, right: Rect) -> bool:
     )
 
 
+def _union_contains_rectangle(changed: Rect, boxes: Sequence[Rect], padding: float) -> bool:
+    """Check exact rectangle coverage by a bounded union of axis-aligned boxes."""
+    if changed.x0 >= changed.x1 or changed.y0 >= changed.y1:
+        return False
+    if len(boxes) > MAX_UNION_CONTAINMENT_BOXES:
+        return False
+    expanded = [expand_rect(box, padding) for box in boxes]
+    relevant = [
+        box
+        for box in expanded
+        if box.x0 < changed.x1
+        and box.x1 > changed.x0
+        and box.y0 < changed.y1
+        and box.y1 > changed.y0
+    ]
+    x_boundaries = {changed.x0, changed.x1}
+    for box in relevant:
+        x_boundaries.add(max(changed.x0, box.x0))
+        x_boundaries.add(min(changed.x1, box.x1))
+    ordered_x = sorted(x_boundaries)
+    for left, right in pairwise(ordered_x):
+        intervals = sorted(
+            (box.y0, box.y1) for box in relevant if box.x0 <= left and right <= box.x1
+        )
+        covered_until = changed.y0
+        for bottom, top in intervals:
+            if bottom > covered_until:
+                return False
+            covered_until = max(covered_until, top)
+            if covered_until >= changed.y1:
+                break
+        if covered_until < changed.y1:
+            return False
+    return True
+
+
 def assess_visual_change(
     *,
     expected_box: Rect | None,
@@ -119,7 +158,7 @@ def assess_visual_change(
             remediation="Restore the protected rendered region.",
             locations=locations,
         )
-    if any(rect_contains(expand_rect(box, padding), changed) for box in boxes):
+    if _union_contains_rectangle(changed, boxes, padding):
         return _finding(
             rule_id="contract-safe.visual.explained",
             outcome=FindingOutcome.PASS,
