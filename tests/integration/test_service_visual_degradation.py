@@ -50,7 +50,7 @@ def test_visual_image_error_returns_partial_without_losing_semantics(
     adapter = FakeAdapter(texts={"before.pdf": ["Revenue 100"], "after.pdf": ["Revenue 101"]})
     monkeypatch.setattr("artifactdiff.formats.base.adapter_for", lambda _: adapter)
     monkeypatch.setattr(
-        "artifactdiff.service.compare_images",
+        "artifactdiff.visual_service.compare_images",
         Mock(side_effect=OSError("rendered image unreadable")),
     )
 

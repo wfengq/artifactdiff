@@ -7,6 +7,7 @@ from PIL import Image
 from artifactdiff.errors import InputValidationError, RenderUnavailableError
 from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot, PageSnapshot
 from artifactdiff.service import CompareOptions, compare_documents, inspect_document
+from artifactdiff.visual_service import compare_visual_pages
 from tests.factories import make_docx, make_pdf
 
 
@@ -136,7 +137,7 @@ def test_visual_false_skips_rendering_and_visual_diff(
     adapter = FakeAdapter(texts={"before.pdf": ["Revenue 100"], "after.pdf": ["Revenue 101"]})
     monkeypatch.setattr("artifactdiff.formats.base.adapter_for", lambda _: adapter)
     monkeypatch.setattr(
-        "artifactdiff.service.compare_images",
+        "artifactdiff.visual_service.compare_images",
         Mock(side_effect=AssertionError("visual diff called")),
     )
 
@@ -148,6 +149,43 @@ def test_visual_false_skips_rendering_and_visual_diff(
     assert run.result.status == "changed"
     assert run.result.visual_changes == []
     assert run.visual_assets == {}
+
+
+def test_visual_page_service_preserves_unpaired_direction_when_requested(
+    tmp_path: Path,
+) -> None:
+    before, after = _different_pdf_paths(tmp_path)
+    left = _snapshot(
+        before,
+        tmp_path / "before",
+        texts=["Cover", "Deleted appendix"],
+        render=True,
+        colors=["white", "white"],
+    )
+    right = _snapshot(
+        after,
+        tmp_path / "after",
+        texts=["Cover"],
+        render=True,
+        colors=["white"],
+    )
+
+    visual = compare_visual_pages(
+        left,
+        right,
+        tmp_path / "output",
+        pixel_threshold=16,
+        tile_size=32,
+        include_unpaired=True,
+    )
+
+    assert visual.available is True
+    assert [
+        (change.before_page, change.after_page, change.changed_pixel_ratio)
+        for change in visual.visual_changes
+    ] == [(2, None, 1.0)]
+    assert visual.changed_pixel_ratio == 0.0
+    assert not (tmp_path / "output" / "work").exists()
 
 
 @pytest.mark.parametrize(
@@ -211,7 +249,7 @@ def test_visual_failure_returns_partial_semantic_result(
     )
     monkeypatch.setattr("artifactdiff.formats.base.adapter_for", lambda _: adapter)
     monkeypatch.setattr(
-        "artifactdiff.service.compare_images",
+        "artifactdiff.visual_service.compare_images",
         Mock(side_effect=RenderUnavailableError("renderer stopped")),
     )
 

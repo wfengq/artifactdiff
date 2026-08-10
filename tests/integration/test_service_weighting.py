@@ -44,7 +44,7 @@ def test_visuals_run_in_page_index_order_and_ratio_is_area_weighted(
             VisualAssets(*paths),
         )
 
-    monkeypatch.setattr("artifactdiff.service.compare_images", fake_compare)
+    monkeypatch.setattr("artifactdiff.visual_service.compare_images", fake_compare)
 
     run = compare_documents(
         before,
