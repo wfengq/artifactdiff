@@ -26,6 +26,12 @@ from artifactdiff.errors import PolicyValidationError
 from artifactdiff.models import Rect, VisualPageChange
 from artifactdiff.normalize import normalize_text
 from artifactdiff.policy import FrozenPolicy, ProtectedTarget, validate_frozen_policy
+from artifactdiff.verification.alignment import (
+    AlignmentBudget,
+    OccurrenceAnchor,
+    TextSpan,
+    prove_atomic_occurrence_alignment,
+)
 from artifactdiff.verification.facts import diff_contracts
 from artifactdiff.verification.models import (
     MAX_VERDICT_FINDINGS,
@@ -62,18 +68,6 @@ _REGION_TARGET = {
     "seal": ProtectedTarget.SEALS,
     "attachment": ProtectedTarget.ATTACHMENTS,
 }
-MAX_OCCURRENCE_ALIGNMENT_CELLS = 4_000_000
-
-
-@dataclass(frozen=True, slots=True)
-class _Span:
-    start: int
-    end: int
-
-
-@dataclass(slots=True)
-class _AlignmentBudget:
-    remaining_cells: int = MAX_OCCURRENCE_ALIGNMENT_CELLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,8 +75,8 @@ class _ExpectedAssessment:
     rule_id: str
     before_clause: ContractClause
     after_clause: ContractClause
-    before_spans: tuple[_Span, ...]
-    after_spans: tuple[_Span, ...]
+    before_spans: tuple[TextSpan, ...]
+    after_spans: tuple[TextSpan, ...]
     after_value: str
     corresponds: bool
     applied: bool
@@ -331,77 +325,19 @@ def _one_clause(document: ContractDocument, clause_id: str) -> ContractClause | 
     return matches[0] if len(matches) == 1 else None
 
 
-def _find_spans(text: str, needle: str) -> tuple[_Span, ...]:
+def _find_spans(text: str, needle: str) -> tuple[TextSpan, ...]:
     if not needle:
         return ()
-    spans: list[_Span] = []
+    spans: list[TextSpan] = []
     start = 0
     while (index := text.find(needle, start)) >= 0:
-        spans.append(_Span(index, index + len(needle)))
+        spans.append(TextSpan(index, index + len(needle)))
         start = index + len(needle)
     return tuple(spans)
 
 
 def _nfc(value: str) -> str:
     return unicodedata.normalize("NFC", value)
-
-
-def _bounded_edit_distance(left: str, right: str, budget: _AlignmentBudget) -> int | None:
-    cells = len(left) * len(right)
-    if cells > budget.remaining_cells:
-        return None
-    budget.remaining_cells -= cells
-    if len(left) < len(right):
-        left, right = right, left
-    previous = list(range(len(right) + 1))
-    for left_index, left_character in enumerate(left, 1):
-        current = [left_index]
-        for right_index, right_character in enumerate(right, 1):
-            current.append(
-                min(
-                    current[-1] + 1,
-                    previous[right_index] + 1,
-                    previous[right_index - 1] + (left_character != right_character),
-                )
-            )
-        previous = current
-    return previous[-1]
-
-
-def _revert_occurrences(
-    after_text: str,
-    after_spans: tuple[_Span, ...],
-    before_value: str,
-) -> str:
-    pieces: list[str] = []
-    cursor = 0
-    for span in after_spans:
-        pieces.extend((after_text[cursor : span.start], before_value))
-        cursor = span.end
-    pieces.append(after_text[cursor:])
-    return "".join(pieces)
-
-
-def _occurrences_correspond(
-    before_text: str,
-    after_text: str,
-    before_spans: tuple[_Span, ...],
-    after_spans: tuple[_Span, ...],
-    before_value: str,
-    budget: _AlignmentBudget,
-) -> bool:
-    if len(before_spans) != len(after_spans):
-        return False
-    normalized_before = normalize_text(before_text)
-    normalized_after = normalize_text(after_text)
-    normalized_reverted = normalize_text(_revert_occurrences(after_text, after_spans, before_value))
-    observed_distance = _bounded_edit_distance(normalized_before, normalized_after, budget)
-    reverted_distance = _bounded_edit_distance(normalized_before, normalized_reverted, budget)
-    return (
-        observed_distance is not None
-        and reverted_distance is not None
-        and reverted_distance < observed_distance
-    )
 
 
 def _selector_failure(*, rule_id: str, location: str, status: SelectorResolutionStatus) -> Finding:
@@ -458,7 +394,7 @@ def _expected_phase(
     findings: list[Finding] = []
     assessments: list[_ExpectedAssessment] = []
     selector_failures: set[tuple[str, str, str]] = set()
-    alignment_budget = _AlignmentBudget()
+    alignment_budget = AlignmentBudget()
     for rule in sorted(frozen.policy.expect, key=lambda item: item.id):
         before_clause, after_clause, before_status, after_status = _resolve_rule_clauses(
             baseline, candidate, rule.selector
@@ -498,15 +434,21 @@ def _expected_phase(
             and after_text.count(after_value) == operation.occurrences
             and after_text.count(before_value) == 0
         )
-        corresponds = counted and _occurrences_correspond(
+        anchors = (
+            tuple(
+                OccurrenceAnchor(before=before_span, after=after_span)
+                for before_span, after_span in zip(before_spans, after_spans, strict=True)
+            )
+            if counted
+            else ()
+        )
+        corresponds = counted and prove_atomic_occurrence_alignment(
             before_text,
             after_text,
-            before_spans,
-            after_spans,
-            before_value,
+            anchors,
             alignment_budget,
         )
-        applied = counted
+        applied = counted and corresponds
         reconstructed = before_text.replace(before_value, after_value, operation.occurrences)
         exact = applied and normalize_text(reconstructed) == normalize_text(after_text)
         rule_location = f"{location}:{_clause_location(before_clause, after_clause)}"
@@ -664,8 +606,8 @@ def _allow_phase(
 
 def _authorized_spans(
     assessments: list[_ExpectedAssessment], *, before: bool
-) -> dict[str, tuple[_Span, ...]]:
-    result: dict[str, list[_Span]] = {}
+) -> dict[str, tuple[TextSpan, ...]]:
+    result: dict[str, list[TextSpan]] = {}
     for assessment in assessments:
         if not assessment.applied:
             continue
@@ -678,7 +620,7 @@ def _authorized_spans(
     }
 
 
-def _inside_any(span: _Span, authorized: tuple[_Span, ...]) -> bool:
+def _inside_any(span: TextSpan, authorized: tuple[TextSpan, ...]) -> bool:
     return any(item.start <= span.start and item.end >= span.end for item in authorized)
 
 
@@ -686,7 +628,7 @@ def _entity_side_authorized(
     clause: ContractClause | None,
     kind: EntityKind,
     value: str | None,
-    authorized: dict[str, tuple[_Span, ...]],
+    authorized: dict[str, tuple[TextSpan, ...]],
 ) -> bool:
     if clause is None or value is None:
         return False

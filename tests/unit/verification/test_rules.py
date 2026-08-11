@@ -446,8 +446,94 @@ def test_exact_operation_at_wrong_repeated_context_fails_nonapprovably() -> None
     assert expected.approvable is False
 
 
+def test_near_collision_cannot_credit_expected_operation_at_wrong_occurrence() -> None:
+    baseline = _contract(
+        _clause(
+            "before-payment",
+            "Payment obligations\nFirst required position: RED\nSecond unrelated position: RDX",
+        ),
+        sha="a",
+    )
+    candidate = _contract(
+        _clause(
+            "after-payment",
+            "Payment obligations\nFirst required position: GREEN\nSecond unrelated position: BLUE",
+        ),
+        sha="b",
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="RED", after="BLUE", allow=True),
+    )
+
+    expected = next(
+        item for item in verdict.findings if item.rule_id == "contract-safe.expected.payment-window"
+    )
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert expected.outcome is FindingOutcome.FAIL
+    assert expected.approvable is False
+
+
+def test_multiple_occurrences_of_one_operation_pass_in_stable_order() -> None:
+    baseline = _contract(
+        _clause(
+            "before-payment",
+            "Payment obligations\nPrimary RED; Payment obligations backup RED.",
+        ),
+        sha="a",
+    )
+    candidate = _contract(
+        _clause(
+            "after-payment",
+            "Payment obligations\nPrimary BLUE; Payment obligations backup BLUE.",
+        ),
+        sha="b",
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(
+            baseline,
+            before="RED",
+            after="BLUE",
+            occurrences=2,
+            anchor="Payment obligations",
+        ),
+    )
+
+    assert verdict.outcome is FindingOutcome.PASS
+    assert all(item.outcome is FindingOutcome.PASS for item in verdict.findings)
+
+
+def test_ambiguous_equal_cost_occurrence_mapping_fails_nonapprovably() -> None:
+    baseline = _contract(
+        _clause("before-payment", "Payment obligations\nRED X X"),
+        sha="a",
+    )
+    candidate = _contract(
+        _clause("after-payment", "Payment obligations\nX X BLUE"),
+        sha="b",
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="RED", after="BLUE", allow=True),
+    )
+
+    expected = next(
+        item for item in verdict.findings if item.rule_id == "contract-safe.expected.payment-window"
+    )
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert expected.outcome is FindingOutcome.FAIL
+    assert expected.approvable is False
+
+
 def test_occurrence_alignment_budget_is_total_and_fails_closed() -> None:
-    baseline_text = f"Payment obligations\n{'A' * 750} RED {'B' * 750} YELLOW"
+    baseline_text = f"Payment obligations\n{'A' * 1050} RED {'B' * 1050} YELLOW"
     candidate_text = baseline_text.replace("RED", "BLUE").replace("YELLOW", "GREEN")
     baseline = _contract(_clause("before-payment", baseline_text), sha="a")
     candidate = _contract(_clause("after-payment", candidate_text), sha="b")
@@ -1350,6 +1436,48 @@ def test_multiple_independent_expected_operations_in_one_clause_pass() -> None:
 
     assert verdict.outcome is FindingOutcome.PASS
     assert len([item for item in verdict.findings if ".expected." in item.rule_id]) == 2
+
+
+def test_crossed_independent_expected_operations_fail_nonapprovably() -> None:
+    baseline = _contract(
+        _clause("before-payment", "Payment obligations\nFirst RED; second YELLOW."),
+        sha="a",
+    )
+    candidate = _contract(
+        _clause("after-payment", "Payment obligations\nFirst GREEN; second BLUE."),
+        sha="b",
+    )
+    clause = baseline.clauses[0]
+    selector = ClauseSelector(
+        clause_label=clause.label.normalized,
+        heading=clause.heading,
+        anchor="Payment obligations",
+        baseline_fingerprint=clause.fingerprint,
+    )
+    policy = ContractPolicy(
+        baseline=PolicyBaseline(sha256=baseline.source.sha256, format="docx"),
+        expect=[
+            ExpectedRule(
+                id="first",
+                selector=selector,
+                operation=ExactReplace(before="RED", after="BLUE"),
+            ),
+            ExpectedRule(
+                id="second",
+                selector=selector,
+                operation=ExactReplace(before="YELLOW", after="GREEN"),
+            ),
+        ],
+        allow=[AllowRule(selector=selector, kinds=frozenset({"modified"}))],
+    )
+
+    verdict = _evaluate(baseline, candidate, freeze_policy(baseline, policy))
+
+    expected = [item for item in verdict.findings if ".expected." in item.rule_id]
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert expected
+    assert any(item.outcome is FindingOutcome.FAIL for item in expected)
+    assert all(not item.approvable for item in expected if item.outcome is FindingOutcome.FAIL)
 
 
 def test_every_protected_entity_kind_outside_authorized_span_fails() -> None:
