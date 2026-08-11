@@ -35,3 +35,7 @@ class PathSafetyError(ArtifactDiffError):
 
 class SessionError(ArtifactDiffError):
     """Raised when a verified edit session cannot be safely created or loaded."""
+
+
+class BundleError(ArtifactDiffError):
+    """Raised when a Review Bundle cannot be safely created or verified."""
