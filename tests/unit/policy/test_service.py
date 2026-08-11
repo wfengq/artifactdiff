@@ -125,6 +125,20 @@ def test_policy_service_interfaces_are_public() -> None:
     assert artifactdiff.freeze_policy is freeze_policy
 
 
+def test_validate_policy_rejects_nfc_colliding_mapping_keys() -> None:
+    baseline = _contract()
+    policy = _policy(
+        baseline,
+        required_plugins={
+            "é": PolicyPluginRequirement(version="1", distribution="first"),
+            "e\u0301": PolicyPluginRequirement(version="1", distribution="second"),
+        },
+    )
+
+    with pytest.raises(PolicyValidationError):
+        validate_policy(baseline, policy)
+
+
 @pytest.mark.parametrize(
     ("label", "normalized_label", "heading", "ancestor_path", "anchor"),
     [

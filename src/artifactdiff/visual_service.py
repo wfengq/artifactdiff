@@ -11,7 +11,7 @@ from PIL import Image
 
 from artifactdiff.alignment import AlignedPair, align_sequences
 from artifactdiff.errors import InputValidationError, RenderUnavailableError
-from artifactdiff.models import DocumentSnapshot, PageSnapshot, VisualPageChange
+from artifactdiff.models import DocumentSnapshot, PageSnapshot, Rect, VisualPageChange
 from artifactdiff.visual import VisualAssets, compare_images
 
 
@@ -34,6 +34,7 @@ def compare_visual_pages(
     pixel_threshold: int,
     tile_size: int,
     include_unpaired: bool = False,
+    contract_coordinates: bool = False,
 ) -> VisualComparison:
     """Compare aligned rendered pages and copy changed-page artifacts."""
     output_dir = output_dir.expanduser().resolve()
@@ -45,6 +46,7 @@ def compare_visual_pages(
             pixel_threshold=pixel_threshold,
             tile_size=tile_size,
             include_unpaired=include_unpaired,
+            contract_coordinates=contract_coordinates,
         )
 
 
@@ -56,6 +58,7 @@ def _compare_visual_pages(
     pixel_threshold: int,
     tile_size: int,
     include_unpaired: bool,
+    contract_coordinates: bool,
 ) -> VisualComparison:
     warnings = [*before.warnings, *after.warnings]
     visual_changes: list[VisualPageChange] = []
@@ -83,8 +86,12 @@ def _compare_visual_pages(
                 visual_changes.append(
                     VisualPageChange(
                         id=key,
-                        before_page=left.index + 1 if left is not None else None,
-                        after_page=right.index + 1 if right is not None else None,
+                        before_page=(
+                            _page_number(left, contract_coordinates) if left is not None else None
+                        ),
+                        after_page=(
+                            _page_number(right, contract_coordinates) if right is not None else None
+                        ),
                         changed_pixel_ratio=1.0,
                     )
                 )
@@ -120,13 +127,34 @@ def _compare_visual_pages(
         key = _page_key(left.index + 1, right.index + 1)
         with TemporaryDirectory(prefix="artifactdiff-visual-") as temporary:
             try:
-                visual, temporary_assets = compare_images(
-                    Path(left.render_path),
-                    Path(right.render_path),
-                    output_dir=Path(temporary) / key,
-                    threshold=pixel_threshold,
-                    tile_size=tile_size,
-                )
+                if contract_coordinates:
+                    visual, temporary_assets = compare_images(
+                        Path(left.render_path),
+                        Path(right.render_path),
+                        output_dir=Path(temporary) / key,
+                        threshold=pixel_threshold,
+                        tile_size=tile_size,
+                        precise_regions=True,
+                    )
+                else:
+                    visual, temporary_assets = compare_images(
+                        Path(left.render_path),
+                        Path(right.render_path),
+                        output_dir=Path(temporary) / key,
+                        threshold=pixel_threshold,
+                        tile_size=tile_size,
+                    )
+                if contract_coordinates:
+                    visual = visual.model_copy(
+                        update={
+                            "regions": _document_regions(
+                                visual.regions,
+                                temporary_assets.before_image,
+                                left,
+                                right,
+                            )
+                        }
+                    )
             except (RenderUnavailableError, OSError) as error:
                 warnings.append(f"Visual comparison unavailable: {error}")
                 available = False
@@ -139,8 +167,8 @@ def _compare_visual_pages(
             visual = visual.model_copy(
                 update={
                     "id": key,
-                    "before_page": left.index + 1,
-                    "after_page": right.index + 1,
+                    "before_page": _page_number(left, contract_coordinates),
+                    "after_page": _page_number(right, contract_coordinates),
                 }
             )
             copied = _copy_visual_assets(temporary_assets, output_dir / "visual" / key)
@@ -157,6 +185,38 @@ def _compare_visual_pages(
 
 def _page_key(before_page: int | None, after_page: int | None) -> str:
     return f"page-{before_page if before_page is not None else 'none'}-{after_page if after_page is not None else 'none'}"
+
+
+def _page_number(page: PageSnapshot, contract_coordinates: bool) -> int:
+    return page.index if contract_coordinates else page.index + 1
+
+
+def _document_regions(
+    regions: list[Rect],
+    rendered_page: Path,
+    before: PageSnapshot,
+    after: PageSnapshot,
+) -> list[Rect]:
+    document_width = max(before.width, after.width)
+    document_height = max(before.height, after.height)
+    if document_width <= 0 or document_height <= 0:
+        raise RenderUnavailableError("rendered page has invalid document dimensions")
+    with Image.open(rendered_page) as image:
+        if image.width <= 0 or image.height <= 0:
+            raise RenderUnavailableError("rendered page has invalid pixel dimensions")
+        scale_x = document_width / image.width
+        scale_y = document_height / image.height
+    return [
+        region.model_copy(
+            update={
+                "x0": region.x0 * scale_x,
+                "y0": region.y0 * scale_y,
+                "x1": region.x1 * scale_x,
+                "y1": region.y1 * scale_y,
+            }
+        )
+        for region in regions
+    ]
 
 
 def _copy_visual_assets(assets: VisualAssets, destination: Path) -> VisualAssets:

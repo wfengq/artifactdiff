@@ -172,7 +172,7 @@ def draft_exact_replace_policy(
 def validate_policy(baseline: ContractDocument, policy: ContractPolicy) -> None:
     """Fail closed unless a contract-safe policy is exact for this baseline."""
     checked_baseline = _validated_baseline(baseline)
-    checked_policy = _validated_policy(policy)
+    checked_policy = _canonicalized_policy(policy)
     if (
         checked_policy.baseline.sha256 != checked_baseline.source.sha256
         or checked_policy.baseline.format != checked_baseline.source.format
@@ -205,7 +205,7 @@ def freeze_policy(baseline: ContractDocument, policy: ContractPolicy) -> FrozenP
         raise PolicyValidationError("invalid frozen policy") from None
 
 
-def _validated_frozen_policy(policy: FrozenPolicy) -> FrozenPolicy:
+def _validated_frozen_policy(policy: object) -> FrozenPolicy:
     try:
         validated = FrozenPolicy.model_validate(policy)
         canonical_policy = _validated_contract_safe_policy(validated.policy)
@@ -222,6 +222,19 @@ def _validated_frozen_policy(policy: FrozenPolicy) -> FrozenPolicy:
         raise
     except (ValidationError, RecursionError, OverflowError, TypeError, ValueError):
         raise PolicyValidationError("invalid frozen policy") from None
+
+
+def validate_frozen_policy(baseline: ContractDocument, policy: object) -> FrozenPolicy:
+    """Return one canonical frozen policy valid for the inspected baseline."""
+    checked_baseline = _validated_baseline(baseline)
+    checked_policy = validate_frozen_policy_integrity(policy)
+    validate_policy(checked_baseline, checked_policy.policy)
+    return checked_policy
+
+
+def validate_frozen_policy_integrity(policy: object) -> FrozenPolicy:
+    """Return one canonical, semantically safe, digest-verified frozen policy."""
+    return _validated_frozen_policy(policy)
 
 
 def _frozen_policy_bytes(policy: FrozenPolicy) -> bytes:

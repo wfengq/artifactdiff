@@ -74,9 +74,7 @@ def contract_lines(language: ContractLanguage, payment_days: int = 30) -> list[s
     raise ValueError(f"Unsupported contract language: {language}")
 
 
-def make_contract_docx(
-    path: Path, *, language: ContractLanguage, payment_days: int = 30
-) -> Path:
+def make_contract_docx(path: Path, *, language: ContractLanguage, payment_days: int = 30) -> Path:
     """Create a byte-stable four-clause DOCX contract fixture."""
     document = Document()
     properties = document.core_properties
@@ -98,7 +96,12 @@ def make_contract_docx(
 
 
 def make_contract_pdf(
-    path: Path, *, language: ContractLanguage, payment_days: int = 30
+    path: Path,
+    *,
+    language: ContractLanguage,
+    payment_days: int = 30,
+    signature_y_offset: float = 0.0,
+    extra_visual_mark: bool = False,
 ) -> Path:
     """Create a byte-stable four-clause PDF contract fixture."""
     from reportlab.lib.pagesizes import letter
@@ -122,8 +125,11 @@ def make_contract_pdf(
     document.setFont(font_name, 10)
     y = 700
     for line in contract_lines(language, payment_days):
-        document.drawString(72, y, line)
+        line_y = y + signature_y_offset if "signature" in line.casefold() or "签字" in line else y
+        document.drawString(72, line_y, line)
         y -= 32
+    if extra_visual_mark:
+        document.rect(500, 400, 18, 18, fill=1, stroke=0)
     document.save()
     return path
 
@@ -139,9 +145,10 @@ def _contract_margins(language: ContractLanguage) -> tuple[str, str]:
 def _stable_zip(package: bytes) -> bytes:
     source = BytesIO(package)
     destination = BytesIO()
-    with ZipFile(source) as archive, ZipFile(
-        destination, "w", compression=ZIP_DEFLATED, compresslevel=9
-    ) as stable:
+    with (
+        ZipFile(source) as archive,
+        ZipFile(destination, "w", compression=ZIP_DEFLATED, compresslevel=9) as stable,
+    ):
         for member in sorted(archive.infolist(), key=lambda item: item.filename):
             info = ZipInfo(member.filename, _FIXED_ZIP_TIMESTAMP)
             info.compress_type = ZIP_DEFLATED

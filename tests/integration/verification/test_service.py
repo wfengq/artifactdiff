@@ -8,11 +8,18 @@ import pytest
 from PIL import Image
 
 from artifactdiff.contract import ClauseSelector, load_contract
-from artifactdiff.errors import InputValidationError
+from artifactdiff.errors import InputValidationError, PolicyValidationError
 from artifactdiff.formats import adapter_for as real_adapter_for
 from artifactdiff.models import ContentType, DocumentSnapshot, PageSnapshot
 from artifactdiff.normalize import sha256_file
-from artifactdiff.policy import draft_exact_replace_policy, freeze_policy
+from artifactdiff.policy import (
+    ContractPolicy,
+    FrozenPolicy,
+    PolicyPluginRequirement,
+    draft_exact_replace_policy,
+    freeze_policy,
+    policy_digest,
+)
 from artifactdiff.verification.models import FindingOutcome
 from artifactdiff.verification.service import VerificationOptions, verify_contract_change
 from artifactdiff.visual_service import VisualComparison
@@ -110,6 +117,56 @@ def contract_edit_fixture(
     return baseline, candidate, freeze_policy(contract, policy)
 
 
+_SEMANTIC_POLICY_BYPASSES = (
+    "empty-expect",
+    "allow-network",
+    "allow-model",
+    "missing-fingerprint",
+    "no-op",
+    "occurrence-mismatch",
+)
+
+
+def _redigested_semantically_invalid_frozen(frozen: FrozenPolicy, case: str) -> FrozenPolicy:
+    policy = frozen.policy.model_copy(deep=True)
+    if case == "empty-expect":
+        policy.expect = []
+    elif case in {"allow-network", "allow-model"}:
+        policy.required_plugins = {
+            "unsafe-plugin": PolicyPluginRequirement(
+                version="1",
+                distribution="unsafe-plugin",
+                allow_network=case == "allow-network",
+                allow_model=case == "allow-model",
+            )
+        }
+    elif case == "missing-fingerprint":
+        policy.expect[0].selector.baseline_fingerprint = ""
+    elif case == "no-op":
+        policy.expect[0].operation.after = policy.expect[0].operation.before
+    else:
+        policy.expect[0].operation.occurrences = 2
+    checked = ContractPolicy.model_validate(policy)
+    return FrozenPolicy(policy=checked, canonical_sha256=policy_digest(checked))
+
+
+@pytest.mark.parametrize("case", _SEMANTIC_POLICY_BYPASSES)
+def test_service_rejects_redigested_semantically_invalid_frozen_policy(
+    tmp_path: Path, case: str
+) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    invalid = _redigested_semantically_invalid_frozen(frozen, case)
+
+    with pytest.raises(PolicyValidationError):
+        verify_contract_change(
+            baseline,
+            candidate,
+            invalid,
+            tmp_path / "out",
+            options=VerificationOptions(visual=False),
+        )
+
+
 @pytest.mark.parametrize(
     ("baseline_format", "candidate_format"),
     [("docx", "docx"), ("pdf", "pdf"), ("docx", "pdf")],
@@ -135,6 +192,89 @@ def test_flagship_edit_passes_all_supported_paths_with_available_visual_evidence
     assert payload["comparison"]["before"]["format"] == baseline_format
     assert payload["comparison"]["after"]["format"] == candidate_format
     assert payload["environment"]["visual_available"] is True
+
+
+def test_real_pdf_visual_edit_uses_zero_based_document_coordinates(tmp_path: Path) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+
+    run = verify_contract_change(
+        baseline,
+        candidate,
+        frozen,
+        tmp_path / "real-pdf-output",
+        options=VerificationOptions(),
+    )
+
+    assert run.result.outcome is FindingOutcome.PASS
+    payload = json.loads(run.json_path.read_text(encoding="utf-8"))
+    assert payload["environment"]["visual_available"] is True
+    assert run.comparison.visual_changes
+    assert all(
+        change.before_page == 0 and change.after_page == 0
+        for change in run.comparison.visual_changes
+    )
+    assert all(
+        region.x1 <= 612 and region.y1 <= 792
+        for change in run.comparison.visual_changes
+        for region in change.regions
+    )
+    assert any(
+        finding.rule_id == "contract-safe.visual.explained" for finding in run.result.findings
+    )
+
+
+def test_real_pdf_visual_change_outside_expected_envelope_reviews(tmp_path: Path) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    make_contract_pdf(
+        candidate,
+        language="en",
+        payment_days=45,
+        extra_visual_mark=True,
+    )
+
+    run = verify_contract_change(
+        baseline,
+        candidate,
+        frozen,
+        tmp_path / "outside-output",
+        options=VerificationOptions(),
+    )
+
+    assert run.result.outcome is FindingOutcome.REVIEW
+    outside = [
+        finding
+        for finding in run.result.findings
+        if finding.rule_id == "contract-safe.visual.outside-envelope"
+    ]
+    assert outside
+    assert all(finding.approvable is True for finding in outside)
+
+
+def test_real_pdf_signature_shift_is_nonapprovable_visual_fail(tmp_path: Path) -> None:
+    baseline, candidate, frozen = contract_edit_fixture(tmp_path, "pdf", "pdf", 30, 45)
+    make_contract_pdf(
+        candidate,
+        language="en",
+        payment_days=45,
+        signature_y_offset=18,
+    )
+
+    run = verify_contract_change(
+        baseline,
+        candidate,
+        frozen,
+        tmp_path / "signature-output",
+        options=VerificationOptions(),
+    )
+
+    assert run.result.outcome is FindingOutcome.FAIL
+    protected = [
+        finding
+        for finding in run.result.findings
+        if finding.rule_id == "contract-safe.visual.protected"
+    ]
+    assert protected
+    assert all(finding.approvable is False for finding in protected)
 
 
 def test_visual_false_defaults_to_blocking_review(tmp_path: Path) -> None:

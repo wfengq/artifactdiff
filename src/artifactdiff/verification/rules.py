@@ -22,9 +22,10 @@ from artifactdiff.contract import (
     resolve_candidate,
 )
 from artifactdiff.contract.models import DocumentFeature, EvidenceRef
+from artifactdiff.errors import PolicyValidationError
 from artifactdiff.models import Rect, VisualPageChange
 from artifactdiff.normalize import normalize_text
-from artifactdiff.policy import FrozenPolicy, ProtectedTarget, policy_digest
+from artifactdiff.policy import FrozenPolicy, ProtectedTarget, validate_frozen_policy
 from artifactdiff.verification.facts import diff_contracts
 from artifactdiff.verification.models import (
     MAX_VERDICT_FINDINGS,
@@ -61,12 +62,18 @@ _REGION_TARGET = {
     "seal": ProtectedTarget.SEALS,
     "attachment": ProtectedTarget.ATTACHMENTS,
 }
+MAX_OCCURRENCE_ALIGNMENT_CELLS = 4_000_000
 
 
 @dataclass(frozen=True, slots=True)
 class _Span:
     start: int
     end: int
+
+
+@dataclass(slots=True)
+class _AlignmentBudget:
+    remaining_cells: int = MAX_OCCURRENCE_ALIGNMENT_CELLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,17 +195,6 @@ def _integrity_findings(
     checked_candidate: ContractDocument | None = None
     checked_facts: ContractChangeSet | None = None
     try:
-        checked_frozen = FrozenPolicy.model_validate(frozen)
-    except (ValidationError, RecursionError, TypeError, ValueError):
-        findings.append(
-            _make_finding(
-                rule_id="contract-safe.integrity.policy",
-                outcome=FindingOutcome.FAIL,
-                location="integrity:policy-model",
-                remediation="Use a valid frozen policy.",
-            )
-        )
-    try:
         checked_baseline = _validated_document(baseline)
     except (AttributeError, ValidationError, RecursionError, TypeError, ValueError):
         findings.append(
@@ -220,31 +216,16 @@ def _integrity_findings(
                 remediation="Use a valid inspected candidate contract document.",
             )
         )
-    if checked_frozen is not None:
-        actual_digest = policy_digest(checked_frozen.policy)
-        if checked_frozen.canonical_sha256 != actual_digest:
+    if checked_baseline is not None:
+        try:
+            checked_frozen = validate_frozen_policy(checked_baseline, frozen)
+        except (PolicyValidationError, ValidationError, RecursionError, TypeError, ValueError):
             findings.append(
                 _make_finding(
                     rule_id="contract-safe.integrity.policy",
                     outcome=FindingOutcome.FAIL,
-                    location="integrity:policy-digest",
-                    before_fingerprint=checked_frozen.canonical_sha256,
-                    after_fingerprint=actual_digest,
-                    remediation="Refreeze the policy from its canonical contents.",
-                )
-            )
-        if checked_baseline is not None and (
-            checked_frozen.policy.baseline.sha256 != checked_baseline.source.sha256
-            or checked_frozen.policy.baseline.format != checked_baseline.source.format
-        ):
-            findings.append(
-                _make_finding(
-                    rule_id="contract-safe.integrity.baseline",
-                    outcome=FindingOutcome.FAIL,
-                    location="integrity:baseline",
-                    before_fingerprint=checked_frozen.policy.baseline.sha256,
-                    after_fingerprint=_safe_sha(checked_baseline.source.sha256),
-                    remediation="Verify the exact frozen baseline artifact.",
+                    location="integrity:policy",
+                    remediation="Use a valid frozen policy for this exact baseline.",
                 )
             )
     try:
@@ -365,8 +346,40 @@ def _nfc(value: str) -> str:
     return unicodedata.normalize("NFC", value)
 
 
-def _stable_context(value: str) -> str:
-    return normalize_text(value)[-32:]
+def _bounded_edit_distance(left: str, right: str, budget: _AlignmentBudget) -> int | None:
+    cells = len(left) * len(right)
+    if cells > budget.remaining_cells:
+        return None
+    budget.remaining_cells -= cells
+    if len(left) < len(right):
+        left, right = right, left
+    previous = list(range(len(right) + 1))
+    for left_index, left_character in enumerate(left, 1):
+        current = [left_index]
+        for right_index, right_character in enumerate(right, 1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[right_index] + 1,
+                    previous[right_index - 1] + (left_character != right_character),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _revert_occurrences(
+    after_text: str,
+    after_spans: tuple[_Span, ...],
+    before_value: str,
+) -> str:
+    pieces: list[str] = []
+    cursor = 0
+    for span in after_spans:
+        pieces.extend((after_text[cursor : span.start], before_value))
+        cursor = span.end
+    pieces.append(after_text[cursor:])
+    return "".join(pieces)
 
 
 def _occurrences_correspond(
@@ -374,19 +387,21 @@ def _occurrences_correspond(
     after_text: str,
     before_spans: tuple[_Span, ...],
     after_spans: tuple[_Span, ...],
+    before_value: str,
+    budget: _AlignmentBudget,
 ) -> bool:
     if len(before_spans) != len(after_spans):
         return False
-    for before_span, after_span in zip(before_spans, after_spans, strict=True):
-        before_prefix = _stable_context(before_text[: before_span.start])
-        after_prefix = _stable_context(after_text[: after_span.start])
-        before_suffix = normalize_text(before_text[before_span.end :])[:32]
-        after_suffix = normalize_text(after_text[after_span.end :])[:32]
-        prefix_matches = len(before_prefix) >= 6 and before_prefix == after_prefix
-        suffix_matches = len(before_suffix) >= 6 and before_suffix == after_suffix
-        if not (prefix_matches or suffix_matches):
-            return False
-    return True
+    normalized_before = normalize_text(before_text)
+    normalized_after = normalize_text(after_text)
+    normalized_reverted = normalize_text(_revert_occurrences(after_text, after_spans, before_value))
+    observed_distance = _bounded_edit_distance(normalized_before, normalized_after, budget)
+    reverted_distance = _bounded_edit_distance(normalized_before, normalized_reverted, budget)
+    return (
+        observed_distance is not None
+        and reverted_distance is not None
+        and reverted_distance < observed_distance
+    )
 
 
 def _selector_failure(*, rule_id: str, location: str, status: SelectorResolutionStatus) -> Finding:
@@ -443,6 +458,7 @@ def _expected_phase(
     findings: list[Finding] = []
     assessments: list[_ExpectedAssessment] = []
     selector_failures: set[tuple[str, str, str]] = set()
+    alignment_budget = _AlignmentBudget()
     for rule in sorted(frozen.policy.expect, key=lambda item: item.id):
         before_clause, after_clause, before_status, after_status = _resolve_rule_clauses(
             baseline, candidate, rule.selector
@@ -483,7 +499,12 @@ def _expected_phase(
             and after_text.count(before_value) == 0
         )
         corresponds = counted and _occurrences_correspond(
-            before_text, after_text, before_spans, after_spans
+            before_text,
+            after_text,
+            before_spans,
+            after_spans,
+            before_value,
+            alignment_budget,
         )
         applied = counted
         reconstructed = before_text.replace(before_value, after_value, operation.occurrences)
@@ -812,10 +833,27 @@ def _protected_evidence(
     frozen: FrozenPolicy, baseline: ContractDocument, candidate: ContractDocument
 ) -> list[EvidenceRef]:
     evidence: list[EvidenceRef] = []
+    for entity in [*baseline.entities, *candidate.entities]:
+        if _ENTITY_TARGET[entity.kind] in frozen.policy.protect:
+            evidence.extend(entity.evidence)
     for region in [*baseline.protected_regions, *candidate.protected_regions]:
         if _REGION_TARGET[region.kind.value] in frozen.policy.protect:
             evidence.extend(region.evidence)
-    return evidence
+    unique = {_canonical(item.model_dump(mode="json")): item for item in evidence}
+    return [unique[key] for key in sorted(unique)]
+
+
+def _protected_region_evidence(
+    frozen: FrozenPolicy, baseline: ContractDocument, candidate: ContractDocument
+) -> list[EvidenceRef]:
+    evidence = [
+        item
+        for region in [*baseline.protected_regions, *candidate.protected_regions]
+        if _REGION_TARGET[region.kind.value] in frozen.policy.protect
+        for item in region.evidence
+    ]
+    unique = {_canonical(item.model_dump(mode="json")): item for item in evidence}
+    return [unique[key] for key in sorted(unique)]
 
 
 def _feature_findings(
@@ -875,11 +913,11 @@ def _feature_findings(
     return findings
 
 
-def _rendered_boxes(items: list[EvidenceRef], page: int) -> list[Rect]:
+def _evidence_boxes(items: list[EvidenceRef], page: int) -> list[Rect]:
     return [
-        item.rendered_bbox
+        geometry[1]
         for item in items
-        if item.rendered_page_index == page and item.rendered_bbox is not None
+        if (geometry := _evidence_box(item)) is not None and geometry[0] == page
     ]
 
 
@@ -891,8 +929,8 @@ def _expected_envelopes(
         if not assessment.applied:
             continue
         for page in pages:
-            by_page[page].extend(_rendered_boxes(assessment.before_clause.evidence, page))
-            by_page[page].extend(_rendered_boxes(assessment.after_clause.evidence, page))
+            by_page[page].extend(_evidence_boxes(assessment.before_clause.evidence, page))
+            by_page[page].extend(_evidence_boxes(assessment.after_clause.evidence, page))
     return {
         page: envelope for page, boxes in by_page.items() if (envelope := union_rectangles(boxes))
     }
@@ -902,7 +940,7 @@ def _protected_boxes_by_page(
     frozen: FrozenPolicy, baseline: ContractDocument, candidate: ContractDocument
 ) -> dict[int, list[Rect]]:
     result: dict[int, list[Rect]] = {}
-    for item in _protected_evidence(frozen, baseline, candidate):
+    for item in _protected_region_evidence(frozen, baseline, candidate):
         geometry = _evidence_box(item)
         if geometry is not None:
             result.setdefault(geometry[0], []).append(geometry[1])
@@ -1014,7 +1052,7 @@ def _clause_findings(
         assessment_by_pair.setdefault((item.before_clause.id, item.after_clause.id), []).append(
             item
         )
-    for unresolved in sorted(facts.unresolved_clause_ids):
+    for unresolved in sorted(set(facts.unresolved_clause_ids)):
         findings.append(
             _make_finding(
                 rule_id="contract-safe.unresolved-clause",
@@ -1157,7 +1195,7 @@ def evaluate_contract(
     )
     if availability is not None:
         findings.append(availability)
-    elif visual_changes:
+    if visual_changes:
         findings.extend(
             _visual_findings(
                 checked_policy,

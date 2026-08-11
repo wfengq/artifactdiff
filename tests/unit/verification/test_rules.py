@@ -29,9 +29,11 @@ from artifactdiff.policy import (
     FrozenPolicy,
     MetadataPolicy,
     PolicyBaseline,
+    PolicyPluginRequirement,
     ProtectedTarget,
     VisualPolicy,
     freeze_policy,
+    policy_digest,
 )
 from artifactdiff.verification import (
     ContractChangeSet,
@@ -141,6 +143,39 @@ def _evaluate(
     )
 
 
+_SEMANTIC_POLICY_BYPASSES = (
+    "empty-expect",
+    "allow-network",
+    "allow-model",
+    "missing-fingerprint",
+    "no-op",
+    "occurrence-mismatch",
+)
+
+
+def _redigested_semantically_invalid_frozen(frozen: FrozenPolicy, case: str) -> FrozenPolicy:
+    policy = frozen.policy.model_copy(deep=True)
+    if case == "empty-expect":
+        policy.expect = []
+    elif case in {"allow-network", "allow-model"}:
+        policy.required_plugins = {
+            "unsafe-plugin": PolicyPluginRequirement(
+                version="1",
+                distribution="unsafe-plugin",
+                allow_network=case == "allow-network",
+                allow_model=case == "allow-model",
+            )
+        }
+    elif case == "missing-fingerprint":
+        policy.expect[0].selector.baseline_fingerprint = ""
+    elif case == "no-op":
+        policy.expect[0].operation.after = policy.expect[0].operation.before
+    else:
+        policy.expect[0].operation.occurrences = 2
+    checked = ContractPolicy.model_validate(policy)
+    return FrozenPolicy(policy=checked, canonical_sha256=policy_digest(checked))
+
+
 def test_finding_id_hashes_only_the_stable_rule_identity() -> None:
     assert (
         finding_id(
@@ -219,6 +254,26 @@ def test_raw_verdict_serialization_is_utf8_json_without_implicit_content() -> No
     assert payload["outcome"] == "pass"
     assert payload["findings"][0]["location"] == "clause:payment"
     assert verdict.canonical_bytes() == verdict.canonical_bytes()
+
+
+def test_raw_verdict_rejects_duplicate_finding_ids() -> None:
+    finding = Finding(
+        id="finding-" + "a" * 24,
+        rule_id="contract-safe.test",
+        outcome=FindingOutcome.FAIL,
+        location="integrity:test",
+        evidence=FindingEvidence(),
+        remediation="Repair the test input.",
+    )
+
+    with pytest.raises(ValidationError):
+        RawVerdict(
+            outcome=FindingOutcome.FAIL,
+            policy_sha256="a" * 64,
+            baseline_sha256="b" * 64,
+            candidate_sha256="c" * 64,
+            findings=[finding, finding],
+        )
 
 
 @pytest.mark.parametrize(
@@ -362,6 +417,58 @@ def test_extra_edit_inside_explicit_allow_reviews_approvably() -> None:
     assert verdict.outcome is FindingOutcome.REVIEW
     assert len(allow_findings) == 1
     assert allow_findings[0].approvable is True
+
+
+def test_exact_operation_at_wrong_repeated_context_fails_nonapprovably() -> None:
+    context = "Repeated payment context with stable words "
+    suffix = " and identical trailing words for review."
+    baseline_text = f"Payment obligations\n{context}RED{suffix}\n{context}YELLOW{suffix}"
+    candidate_text = f"Payment obligations\n{context}GREEN{suffix}\n{context}BLUE{suffix}"
+    baseline = _contract(_clause("before-payment", baseline_text), sha="a")
+    candidate = _contract(_clause("after-payment", candidate_text), sha="b")
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(
+            baseline,
+            before="RED",
+            after="BLUE",
+            allow=True,
+        ),
+    )
+
+    expected = next(
+        item for item in verdict.findings if item.rule_id == "contract-safe.expected.payment-window"
+    )
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert expected.outcome is FindingOutcome.FAIL
+    assert expected.approvable is False
+
+
+def test_occurrence_alignment_budget_is_total_and_fails_closed() -> None:
+    baseline_text = f"Payment obligations\n{'A' * 750} RED {'B' * 750} YELLOW"
+    candidate_text = baseline_text.replace("RED", "BLUE").replace("YELLOW", "GREEN")
+    baseline = _contract(_clause("before-payment", baseline_text), sha="a")
+    candidate = _contract(_clause("after-payment", candidate_text), sha="b")
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(
+            baseline,
+            before="RED",
+            after="BLUE",
+            allow=True,
+        ),
+    )
+
+    expected = next(
+        item for item in verdict.findings if item.rule_id == "contract-safe.expected.payment-window"
+    )
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert expected.outcome is FindingOutcome.FAIL
+    assert expected.approvable is False
 
 
 def test_extra_edit_without_explicit_allow_fails() -> None:
@@ -608,6 +715,106 @@ def test_feature_evidence_intersecting_protected_region_fails() -> None:
     assert feature_findings[0].approvable is False
 
 
+@pytest.mark.parametrize(
+    "feature_kind",
+    [
+        DocumentFeatureKind.COMMENT,
+        DocumentFeatureKind.TRACKED_REVISION,
+        DocumentFeatureKind.HIDDEN_TEXT,
+        DocumentFeatureKind.EXTERNAL_LINK,
+        DocumentFeatureKind.EMBEDDED_IMAGE,
+    ],
+)
+@pytest.mark.parametrize(
+    "protected_target",
+    [
+        ProtectedTarget.PARTIES,
+        ProtectedTarget.MONEY,
+        ProtectedTarget.CURRENCY,
+        ProtectedTarget.DATES,
+        ProtectedTarget.DURATIONS,
+        ProtectedTarget.PERCENTAGES,
+    ],
+)
+def test_feature_block_intersecting_each_protected_entity_kind_fails(
+    feature_kind: DocumentFeatureKind,
+    protected_target: ProtectedTarget,
+) -> None:
+    baseline_text = (
+        "Payment obligations\nParty A: Alpha Ltd.; on 2026-08-04 shall pay "
+        "RMB 10,000.00 within 30 days with a 5% fee."
+    )
+    candidate_text = baseline_text.replace("30 days", "45 days")
+    baseline = _contract(_clause("before-payment", baseline_text), sha="a")
+    candidate = _contract(
+        _clause("after-payment", candidate_text),
+        sha="b",
+        features=[
+            _feature(
+                feature_kind,
+                evidence=[EvidenceRef(block_id="block-after-payment")],
+            )
+        ],
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(
+            baseline,
+            before="30 days",
+            after="45 days",
+            protect=frozenset({protected_target}),
+        ),
+    )
+
+    feature_findings = [
+        item for item in verdict.findings if item.rule_id.endswith(feature_kind.value)
+    ]
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert len(feature_findings) == 1
+    assert feature_findings[0].approvable is False
+
+
+def test_feature_bbox_intersecting_protected_entity_fails() -> None:
+    entity_box = Rect(x0=20, y0=20, x1=100, y1=40)
+    baseline_evidence = [EvidenceRef(block_id="before-entity", page_index=0, bbox=entity_box)]
+    candidate_evidence = [EvidenceRef(block_id="after-entity", page_index=0, bbox=entity_box)]
+    baseline, candidate = _exact_pair(
+        before_evidence=baseline_evidence,
+        after_evidence=candidate_evidence,
+        candidate_features=[
+            _feature(
+                DocumentFeatureKind.COMMENT,
+                evidence=[
+                    EvidenceRef(
+                        block_id="different-feature-block",
+                        page_index=0,
+                        bbox=Rect(x0=30, y0=25, x1=60, y1=35),
+                    )
+                ],
+            )
+        ],
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(
+            baseline,
+            before="30 days",
+            after="45 days",
+            protect=frozenset({ProtectedTarget.DURATIONS}),
+        ),
+    )
+
+    feature = next(
+        item for item in verdict.findings if item.rule_id == "contract-safe.feature.comment"
+    )
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert feature.approvable is False
+
+
 def test_business_or_unknown_metadata_fails() -> None:
     baseline, candidate = _exact_pair(
         candidate_features=[
@@ -711,6 +918,41 @@ def test_unresolved_pairing_fails_closed() -> None:
 
     assert verdict.outcome is FindingOutcome.FAIL
     assert any(item.rule_id == "contract-safe.unresolved-clause" for item in verdict.findings)
+    assert len([item.id for item in verdict.findings]) == len(
+        {item.id for item in verdict.findings}
+    )
+
+
+def test_duplicate_unresolved_occurrences_emit_one_stable_finding_id() -> None:
+    baseline, candidate = _exact_pair()
+    duplicate = _clause(
+        "duplicate-id",
+        "Article III Other\nIdentical body.",
+        label="article iii",
+        heading="Other",
+        evidence=[EvidenceRef(block_id="duplicate-first")],
+    )
+    duplicate_second = duplicate.model_copy(
+        update={"evidence": [EvidenceRef(block_id="duplicate-second")]}
+    )
+    baseline = baseline.model_copy(
+        update={"clauses": [*baseline.clauses, duplicate, duplicate_second]}
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="30 days", after="45 days"),
+    )
+
+    unresolved = [
+        item for item in verdict.findings if item.rule_id == "contract-safe.unresolved-clause"
+    ]
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert len(unresolved) == 1
+    assert len([item.id for item in verdict.findings]) == len(
+        {item.id for item in verdict.findings}
+    )
 
 
 def test_policy_and_fact_tampering_fail_integrity_before_policy_rules() -> None:
@@ -728,6 +970,29 @@ def test_policy_and_fact_tampering_fail_integrity_before_policy_rules() -> None:
         assert verdict.findings
         assert all(item.rule_id.startswith("contract-safe.integrity") for item in verdict.findings)
         assert all(item.approvable is False for item in verdict.findings)
+
+
+@pytest.mark.parametrize("case", _SEMANTIC_POLICY_BYPASSES)
+def test_redigested_semantically_invalid_frozen_policy_fails_at_evaluator_boundary(
+    case: str,
+) -> None:
+    baseline, exact_candidate = _exact_pair()
+    candidate = (
+        _contract(
+            _clause("after-payment", "Payment obligations\nPay within 30 days."),
+            sha="b",
+        )
+        if case == "empty-expect"
+        else exact_candidate
+    )
+    frozen = _frozen(baseline, before="30 days", after="45 days")
+    invalid = _redigested_semantically_invalid_frozen(frozen, case)
+
+    verdict = _evaluate(baseline, candidate, invalid)
+
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert [finding.rule_id for finding in verdict.findings] == ["contract-safe.integrity.policy"]
+    assert all(finding.approvable is False for finding in verdict.findings)
 
 
 def test_visual_envelope_unions_before_and_after_rendered_boxes() -> None:
@@ -855,6 +1120,40 @@ def test_deleted_baseline_page_is_a_nonapprovable_fail() -> None:
     assert deletion[0].approvable is False
 
 
+def test_visual_unavailability_does_not_suppress_known_page_deletion() -> None:
+    baseline, candidate = _exact_pair()
+    deleted = VisualPageChange(
+        id="deleted-unavailable",
+        before_page=1,
+        after_page=None,
+        changed_pixel_ratio=1.0,
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="30 days", after="45 days"),
+        visual_changes=[deleted],
+        visual_available=False,
+    )
+
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert {
+        item.rule_id for item in verdict.findings if item.rule_id.startswith("contract-safe.visual")
+    } == {
+        "contract-safe.visual.page-deletion",
+        "contract-safe.visual.unavailable",
+    }
+    assert (
+        next(
+            item
+            for item in verdict.findings
+            if item.rule_id == "contract-safe.visual.page-deletion"
+        ).approvable
+        is False
+    )
+
+
 def test_visual_change_over_protected_rendered_region_fails() -> None:
     payment_evidence = [
         EvidenceRef(
@@ -899,6 +1198,64 @@ def test_visual_change_over_protected_rendered_region_fails() -> None:
 
     assert verdict.outcome is FindingOutcome.FAIL
     assert any(item.rule_id == "contract-safe.visual.protected" for item in verdict.findings)
+
+
+def test_visual_unavailability_does_not_suppress_known_protected_change() -> None:
+    payment_evidence = [
+        EvidenceRef(
+            block_id="payment",
+            rendered_page_index=0,
+            rendered_bbox=Rect(x0=10, y0=10, x1=80, y1=30),
+        )
+    ]
+    protected_evidence = [
+        EvidenceRef(
+            block_id="signature",
+            rendered_page_index=0,
+            rendered_bbox=Rect(x0=100, y0=100, x1=150, y1=130),
+        )
+    ]
+    region = ProtectedRegion(
+        id="signature",
+        kind=ProtectedRegionKind.SIGNATURE,
+        text_fingerprint="s" * 64,
+        evidence=protected_evidence,
+    )
+    baseline, candidate = _exact_pair(
+        before_evidence=payment_evidence,
+        after_evidence=payment_evidence,
+        baseline_regions=[region],
+        candidate_regions=[region.model_copy(update={"id": "signature-after"})],
+    )
+    visual = VisualPageChange(
+        id="protected-unavailable",
+        before_page=0,
+        after_page=0,
+        changed_pixel_ratio=0.1,
+        regions=[Rect(x0=110, y0=105, x1=120, y1=115)],
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="30 days", after="45 days"),
+        visual_changes=[visual],
+        visual_available=False,
+    )
+
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert {
+        item.rule_id for item in verdict.findings if item.rule_id.startswith("contract-safe.visual")
+    } == {
+        "contract-safe.visual.protected",
+        "contract-safe.visual.unavailable",
+    }
+    assert (
+        next(
+            item for item in verdict.findings if item.rule_id == "contract-safe.visual.protected"
+        ).approvable
+        is False
+    )
 
 
 def test_finding_order_ids_and_bytes_are_stable_under_fact_and_visual_permutations() -> None:

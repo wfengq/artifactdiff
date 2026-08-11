@@ -25,6 +25,7 @@ def compare_images(
     output_dir: Path,
     threshold: int = 16,
     tile_size: int = 32,
+    precise_regions: bool = False,
 ) -> tuple[VisualPageChange, VisualAssets]:
     """Compare two images on a shared white canvas and write deterministic assets."""
     threshold = max(0, min(255, threshold))
@@ -50,7 +51,7 @@ def compare_images(
         mask = resources.enter_context(ImageChops.lighter(pixel_mask, extent_mask))
         changed_pixels = mask.histogram()[255]
         ratio = changed_pixels / (mask.width * mask.height)
-        regions = _coalesced_tile_regions(mask, tile_size)
+        regions = _coalesced_tile_regions(mask, tile_size, precise_bounds=precise_regions)
         heatmap = resources.enter_context(_heatmap(right, mask))
         return _write_visual_result(left, right, heatmap, regions, ratio, output_dir)
 
@@ -80,7 +81,9 @@ def _extent_difference(
         right_extent.close()
 
 
-def _coalesced_tile_regions(mask: Image.Image, tile_size: int) -> list[Rect]:
+def _coalesced_tile_regions(
+    mask: Image.Image, tile_size: int, *, precise_bounds: bool = False
+) -> list[Rect]:
     horizontal: list[tuple[int, int, int, int]] = []
     for y0 in range(0, mask.height, tile_size):
         y1 = min(y0 + tile_size, mask.height)
@@ -88,12 +91,27 @@ def _coalesced_tile_regions(mask: Image.Image, tile_size: int) -> list[Rect]:
         for x0 in range(0, mask.width, tile_size):
             x1 = min(x0 + tile_size, mask.width)
             with mask.crop((x0, y0, x1, y1)) as tile:
-                changed = tile.getbbox() is not None
-            if changed:
+                bounds = tile.getbbox()
+            if bounds is not None:
+                rectangle = (
+                    (
+                        x0 + bounds[0],
+                        y0 + bounds[1],
+                        x0 + bounds[2],
+                        y0 + bounds[3],
+                    )
+                    if precise_bounds
+                    else (x0, y0, x1, y1)
+                )
                 if current is None:
-                    current = (x0, y0, x1, y1)
+                    current = rectangle
                 else:
-                    current = (current[0], current[1], x1, current[3])
+                    current = (
+                        current[0],
+                        min(current[1], rectangle[1]),
+                        rectangle[2],
+                        max(current[3], rectangle[3]),
+                    )
             elif current is not None:
                 horizontal.append(current)
                 current = None

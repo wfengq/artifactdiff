@@ -21,6 +21,8 @@ from artifactdiff.policy.service import (
     draft_exact_replace_policy,
     freeze_policy,
     load_frozen_policy,
+    validate_frozen_policy,
+    validate_frozen_policy_integrity,
     validate_policy,
     write_frozen_policy,
 )
@@ -45,6 +47,8 @@ __all__ = [
     "load_frozen_policy",
     "load_policy",
     "policy_digest",
+    "validate_frozen_policy",
+    "validate_frozen_policy_integrity",
     "validate_policy",
     "write_frozen_policy",
     "write_policy",

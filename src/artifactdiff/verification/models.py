@@ -189,6 +189,14 @@ class RawVerdict(FactModel):
     _labels_are_text = field_validator("schema_version", "outcome", mode="before")(_require_text)
     _findings_are_ordered = field_validator("findings", mode="before")(_require_ordered)
 
+    @field_validator("findings")
+    @classmethod
+    def require_unique_finding_ids(cls, findings: list[Finding]) -> list[Finding]:
+        identifiers = [finding.id for finding in findings]
+        if len(identifiers) != len(set(identifiers)):
+            raise ValueError("finding identifiers must be unique")
+        return findings
+
     def canonical_bytes(self) -> bytes:
         """Serialize deterministic UTF-8 JSON for later reporting."""
         return json.dumps(

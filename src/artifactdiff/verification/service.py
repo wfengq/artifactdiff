@@ -17,6 +17,7 @@ from artifactdiff.models import (
     SourceDescriptor,
 )
 from artifactdiff.normalize import sha256_file
+from artifactdiff.policy import validate_frozen_policy, validate_frozen_policy_integrity
 from artifactdiff.policy.models import FrozenPolicy
 from artifactdiff.semantic import diff_snapshots
 from artifactdiff.verification import diff_contracts, evaluate_contract
@@ -65,7 +66,8 @@ def _verify_contract_change_locked(
 ) -> VerificationRun:
     checked_baseline = validate_source(baseline, force=False)
     checked_candidate = validate_source(candidate, force=False)
-    if frozen_policy.policy.baseline.sha256 != sha256_file(checked_baseline):
+    checked_policy_integrity = validate_frozen_policy_integrity(frozen_policy)
+    if checked_policy_integrity.policy.baseline.sha256 != sha256_file(checked_baseline):
         raise PolicyValidationError("baseline hash does not match frozen policy")
     pair = (checked_baseline.suffix.casefold(), checked_candidate.suffix.casefold())
     if pair not in SUPPORTED_VERIFICATION_PAIRS:
@@ -86,6 +88,7 @@ def _verify_contract_change_locked(
             force=False,
             workdir=workdir / "candidate",
         )
+        checked_policy = validate_frozen_policy(baseline_contract, checked_policy_integrity)
         with _visual_output_transaction(output_root):
             visual = _visual_comparison(
                 baseline_snapshot,
@@ -95,7 +98,7 @@ def _verify_contract_change_locked(
             )
             facts = diff_contracts(baseline_contract, candidate_contract)
             verdict = evaluate_contract(
-                frozen_policy,
+                checked_policy,
                 baseline_contract,
                 candidate_contract,
                 facts,
@@ -113,7 +116,7 @@ def _verify_contract_change_locked(
                 visual,
                 output_root,
                 comparison=comparison,
-                frozen_policy=frozen_policy,
+                frozen_policy=checked_policy,
             )
 
 
@@ -134,6 +137,7 @@ def _visual_comparison(
         pixel_threshold=options.pixel_threshold,
         tile_size=options.tile_size,
         include_unpaired=True,
+        contract_coordinates=True,
     )
 
 
