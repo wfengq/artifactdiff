@@ -23,3 +23,7 @@ class ResourceLimitError(ArtifactDiffError):
 
 class RenderUnavailableError(ArtifactDiffError):
     """Raised when a requested rendering capability is unavailable."""
+
+
+class SignatureError(ArtifactDiffError):
+    """Raised when signing material or trust validation is invalid."""
