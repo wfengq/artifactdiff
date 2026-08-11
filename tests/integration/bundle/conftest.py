@@ -65,6 +65,7 @@ class BundleFixture:
     authorization: PolicyAuthorization
     session_event: object
     archive_signer: MemorySigner
+    approver_signer: MemorySigner
     trust_store: TrustStore
 
     def local_args(self) -> dict[str, object]:
@@ -104,7 +105,11 @@ def _identity(
     ).decode("ascii")
     return TrustIdentity(
         id=identity,
-        subject_type="human" if role is TrustRole.POLICY_AUTHORIZER else "service",
+        subject_type=(
+            "human"
+            if role in {TrustRole.POLICY_AUTHORIZER, TrustRole.FINDING_APPROVER}
+            else "service"
+        ),
         public_key_fingerprint=hashlib.sha256(public_der).hexdigest(),
         public_key_pem=public_pem,
         roles=frozenset({role}),
@@ -194,6 +199,7 @@ def bundle_fixture(tmp_path: Path) -> BundleFixture:
 
     authorizer_key = Ed25519PrivateKey.generate()
     archive_key = Ed25519PrivateKey.generate()
+    approver_key = Ed25519PrivateKey.generate()
     authorizer = _identity(
         authorizer_key,
         identity="bundle-policy-authorizer",
@@ -204,10 +210,16 @@ def bundle_fixture(tmp_path: Path) -> BundleFixture:
         identity="bundle-archive-signer",
         role=TrustRole.ARCHIVE_SIGNER,
     )
+    approver_identity = _identity(
+        approver_key,
+        identity="bundle-human-approver",
+        role=TrustRole.FINDING_APPROVER,
+    )
     authorizer_signer = MemorySigner(authorizer_key, authorizer)
     archive_signer = MemorySigner(archive_key, archive_identity)
+    approver_signer = MemorySigner(approver_key, approver_identity)
     authorization = authorize_policy(frozen, signer=authorizer_signer)
-    trust_store = TrustStore(identities=[authorizer, archive_identity])
+    trust_store = TrustStore(identities=[authorizer, archive_identity, approver_identity])
     session = open_verified_edit_session(
         baseline,
         frozen,
@@ -227,5 +239,6 @@ def bundle_fixture(tmp_path: Path) -> BundleFixture:
         authorization=authorization,
         session_event=session.events[0],
         archive_signer=archive_signer,
+        approver_signer=approver_signer,
         trust_store=trust_store,
     )

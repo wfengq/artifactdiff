@@ -39,3 +39,7 @@ class SessionError(ArtifactDiffError):
 
 class BundleError(ArtifactDiffError):
     """Raised when a Review Bundle cannot be safely created or verified."""
+
+
+class ApprovalError(ArtifactDiffError):
+    """Raised when a finding decision cannot be safely appended or verified."""

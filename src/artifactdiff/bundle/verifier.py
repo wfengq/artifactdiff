@@ -287,6 +287,65 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
             )
             if not event_chain_valid:
                 errors.append("bundle_event_chain_invalid")
+
+        from artifactdiff.bundle.events import signed_event_digest, unsigned_approval_digest
+        from artifactdiff.review.models import ApprovalEvent
+
+        approval_paths = sorted((root / "events").glob("*-approval.json"))
+        expected_event_names = ({"000001-session-opened.json"} if verified else set()) | {
+            path.name for path in approval_paths
+        }
+        actual_event_names = {
+            path.name
+            for path in (root / "events").iterdir()
+            if path.is_file() and path.name != ".events.lock"
+        }
+        if actual_event_names != expected_event_names:
+            errors.append("bundle_event_file_set_invalid")
+        previous_event_digest = manifest.event_chain_head or manifest_digest
+        expected_sequence = 2 if verified else 1
+        decided_findings: set[str] = set()
+        eligible_findings = {
+            finding.id
+            for finding in verdict.findings
+            if finding.outcome.value == "review" and finding.approvable
+        }
+        approval_chain_valid = event_chain_valid
+        for approval_path in approval_paths:
+            approval_value = _load_canonical(approval_path, ApprovalEvent)
+            if not isinstance(approval_value, ApprovalEvent):
+                raise BundleError("approval_event_schema_invalid")
+            approval = approval_value
+            inspection = inspect_signature(
+                approval.signature,
+                purpose="finding_approval",
+                digest=unsigned_approval_digest(approval),
+                required_role=TrustRole.FINDING_APPROVER,
+                trust_store=trust_store,
+            )
+            approval_signature_valid = bool(
+                inspection.signature_valid
+                and inspection.identity is not None
+                and TrustRole.FINDING_APPROVER in inspection.identity.roles
+                and inspection.identity.subject_type == "human"
+            )
+            signature_states.append(approval_signature_valid)
+            trust_states.append(inspection.currently_trusted)
+            approval_chain_valid = bool(
+                approval_chain_valid
+                and approval.sequence == expected_sequence
+                and approval.verification_digest == manifest_digest
+                and approval.previous_event_digest == previous_event_digest
+                and approval.finding_id in eligible_findings
+                and approval.finding_id not in decided_findings
+                and approval_signature_valid
+            )
+            decided_findings.add(approval.finding_id)
+            previous_event_digest = signed_event_digest(approval)
+            expected_sequence += 1
+        event_chain_valid = approval_chain_valid
+        if not event_chain_valid:
+            errors.append("bundle_event_chain_invalid")
     except BundleError as error:
         errors.append(str(error))
     except (OSError, ValidationError, RecursionError, TypeError, ValueError):
