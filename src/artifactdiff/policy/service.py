@@ -1,5 +1,6 @@
 """Baseline-bound policy drafting, validation, freezing, and frozen JSON IO."""
 
+import hashlib
 import json
 import tempfile
 import unicodedata
@@ -246,6 +247,11 @@ def _frozen_policy_bytes(policy: FrozenPolicy) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def frozen_policy_digest(policy: FrozenPolicy) -> str:
+    """Return the canonical digest signed by policy authorizers."""
+    return hashlib.sha256(_frozen_policy_bytes(policy)).hexdigest()
 
 
 def write_frozen_policy(policy: FrozenPolicy, path: Path) -> Path:

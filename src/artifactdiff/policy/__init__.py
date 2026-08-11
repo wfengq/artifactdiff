@@ -20,6 +20,7 @@ from artifactdiff.policy.profile import CONTRACT_SAFE_PROFILE_VERSION
 from artifactdiff.policy.service import (
     draft_exact_replace_policy,
     freeze_policy,
+    frozen_policy_digest,
     load_frozen_policy,
     validate_frozen_policy,
     validate_frozen_policy_integrity,
@@ -44,6 +45,7 @@ __all__ = [
     "canonical_policy_bytes",
     "draft_exact_replace_policy",
     "freeze_policy",
+    "frozen_policy_digest",
     "load_frozen_policy",
     "load_policy",
     "policy_digest",

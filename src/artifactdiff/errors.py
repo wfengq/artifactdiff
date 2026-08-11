@@ -27,3 +27,11 @@ class RenderUnavailableError(ArtifactDiffError):
 
 class SignatureError(ArtifactDiffError):
     """Raised when signing material or trust validation is invalid."""
+
+
+class PathSafetyError(ArtifactDiffError):
+    """Raised when a path escapes its configured trust boundary."""
+
+
+class SessionError(ArtifactDiffError):
+    """Raised when a verified edit session cannot be safely created or loaded."""
