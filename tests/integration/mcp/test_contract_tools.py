@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.contract import ClauseSelector
+from artifactdiff.errors import InputValidationError
 from artifactdiff.mcp_paths import McpRoots
 from artifactdiff.mcp_server import create_mcp, mcp
 from artifactdiff.session import SealedPolicyArtifact, write_sealed_policy
@@ -150,8 +152,7 @@ async def test_mcp_contract_workflow_returns_only_bounded_public_fields(
         "assurance": "local",
         "signature_valid_at_creation": None,
         "currently_trusted": None,
-        "event_chain_valid": True,
-        "errors": [],
+        "effective_outcome": verified["effective_verdict"],
     }
 
 
@@ -209,9 +210,9 @@ async def test_mcp_rejects_signed_policy_without_creating_verification_output(
         SealedPolicyArtifact(
             frozen=bundle_fixture.frozen, authorization=bundle_fixture.authorization
         ),
-        outputs / "signed.json",
+        inputs / "signed.json",
     )
-    destination = outputs / "forbidden-bundle"
+    destination = outputs / "forbidden" / "bundle"
 
     response = await _call(
         configured_mcp,
@@ -229,3 +230,274 @@ async def test_mcp_rejects_signed_policy_without_creating_verification_output(
     assert response["error_type"] == "SessionError"
     assert "controlled CLI or enterprise runner" in str(response["error"])
     assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_an_unregistered_output_policy_before_verification(
+    configured_mcp, tmp_path: Path
+) -> None:
+    """Treating any output-root policy as generated lets a caller smuggle arbitrary artifacts."""
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    baseline, candidate = _contract_pair(inputs)
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    policy = application.draft_policy(
+        baseline,
+        ClauseSelector(
+            clause_label="Article II",
+            heading="Payment Terms",
+            anchor="Party A: Example Ltd.; on 2026-08-04, Party A shall pay RMB 10,000.00 within 30 days with a 5% late fee.",
+        ),
+        rule_id="payment-window",
+        before="30 days",
+        after="45 days",
+    )
+    policy_path = application.write_policy(policy, inputs / "policy.json")
+    sealed = application.seal_policy(baseline, policy_path, outputs / "unregistered.json")
+
+    response = await _call(
+        configured_mcp,
+        "verify_contract_change",
+        {
+            "baseline_path": str(baseline),
+            "candidate_path": str(candidate),
+            "sealed_policy_path": str(sealed),
+            "output_path": str(outputs / "bundle"),
+            "visual": False,
+        },
+    )
+
+    assert response["ok"] is False
+    assert response["error_type"] == "PathSafetyError"
+    assert not (outputs / "bundle").exists()
+
+
+@pytest.mark.anyio
+async def test_mcp_loads_a_registered_sealed_policy_once(
+    configured_mcp, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A separate authorization check and verification load leaves a swap window between reads."""
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    baseline, candidate = _contract_pair(inputs)
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    policy = application.draft_policy(
+        baseline,
+        ClauseSelector(
+            clause_label="Article II",
+            heading="Payment Terms",
+            anchor="Party A: Example Ltd.; on 2026-08-04, Party A shall pay RMB 10,000.00 within 30 days with a 5% late fee.",
+        ),
+        rule_id="payment-window",
+        before="30 days",
+        after="45 days",
+    )
+    policy_path = application.write_policy(policy, inputs / "policy.json")
+    sealed = await _call(
+        configured_mcp,
+        "seal_local_policy",
+        {
+            "baseline_path": str(baseline),
+            "policy_path": str(policy_path),
+            "output_path": str(outputs / "sealed.json"),
+        },
+    )
+    original = __import__("artifactdiff.application", fromlist=["load_sealed_policy"])
+    calls = 0
+    real_load = original.load_sealed_policy
+
+    def counted(path: Path):
+        nonlocal calls
+        calls += 1
+        return real_load(path)
+
+    monkeypatch.setattr(original, "load_sealed_policy", counted)
+    response = await _call(
+        configured_mcp,
+        "verify_contract_change",
+        {
+            "baseline_path": str(baseline),
+            "candidate_path": str(candidate),
+            "sealed_policy_path": str(sealed["sealed_policy_path"]),
+            "output_path": str(outputs / "bundle"),
+            "visual": False,
+        },
+    )
+
+    assert response["ok"] is True
+    assert calls == 1
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_a_sealed_policy_output_as_a_review_bundle(
+    configured_mcp, tmp_path: Path
+) -> None:
+    """A generated artifact capability must be bound to its kind, not merely its output path."""
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    baseline, _ = _contract_pair(inputs)
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    policy = application.draft_policy(
+        baseline,
+        ClauseSelector(
+            clause_label="Article II",
+            heading="Payment Terms",
+            anchor="Party A: Example Ltd.; on 2026-08-04, Party A shall pay RMB 10,000.00 within 30 days with a 5% late fee.",
+        ),
+        rule_id="payment-window",
+        before="30 days",
+        after="45 days",
+    )
+    policy_path = application.write_policy(policy, inputs / "policy.json")
+    sealed = await _call(
+        configured_mcp,
+        "seal_local_policy",
+        {
+            "baseline_path": str(baseline),
+            "policy_path": str(policy_path),
+            "output_path": str(outputs / "sealed.json"),
+        },
+    )
+
+    response = await _call(
+        configured_mcp,
+        "verify_review_bundle",
+        {"bundle_path": str(sealed["sealed_policy_path"])},
+    )
+
+    assert response["ok"] is False
+    assert response["error_type"] == "PathSafetyError"
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_a_swapped_registered_sealed_policy(
+    configured_mcp, tmp_path: Path
+) -> None:
+    """Replacing an output file after registration must invalidate its generated-artifact capability."""
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    baseline, candidate = _contract_pair(inputs)
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    policy = application.draft_policy(
+        baseline,
+        ClauseSelector(
+            clause_label="Article II",
+            heading="Payment Terms",
+            anchor="Party A: Example Ltd.; on 2026-08-04, Party A shall pay RMB 10,000.00 within 30 days with a 5% late fee.",
+        ),
+        rule_id="payment-window",
+        before="30 days",
+        after="45 days",
+    )
+    policy_path = application.write_policy(policy, inputs / "policy.json")
+    sealed = await _call(
+        configured_mcp,
+        "seal_local_policy",
+        {
+            "baseline_path": str(baseline),
+            "policy_path": str(policy_path),
+            "output_path": str(outputs / "sealed.json"),
+        },
+    )
+    sealed_path = Path(str(sealed["sealed_policy_path"]))
+    sealed_path.chmod(stat.S_IWRITE | stat.S_IREAD)
+    sealed_path.write_bytes(b"swapped")
+    destination = outputs / "not-created" / "bundle"
+
+    response = await _call(
+        configured_mcp,
+        "verify_contract_change",
+        {
+            "baseline_path": str(baseline),
+            "candidate_path": str(candidate),
+            "sealed_policy_path": str(sealed_path),
+            "output_path": str(destination),
+            "visual": False,
+        },
+    )
+
+    assert response["ok"] is False
+    assert response["error_type"] == "PathSafetyError"
+    assert not destination.parent.exists()
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_a_tampered_registered_review_bundle(
+    configured_mcp, tmp_path: Path
+) -> None:
+    """A registered bundle still needs independent verification before exposing an effective verdict."""
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    baseline, candidate = _contract_pair(inputs)
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    policy = application.draft_policy(
+        baseline,
+        ClauseSelector(
+            clause_label="Article II",
+            heading="Payment Terms",
+            anchor="Party A: Example Ltd.; on 2026-08-04, Party A shall pay RMB 10,000.00 within 30 days with a 5% late fee.",
+        ),
+        rule_id="payment-window",
+        before="30 days",
+        after="45 days",
+    )
+    policy_path = application.write_policy(policy, inputs / "policy.json")
+    sealed = await _call(
+        configured_mcp,
+        "seal_local_policy",
+        {
+            "baseline_path": str(baseline),
+            "policy_path": str(policy_path),
+            "output_path": str(outputs / "sealed.json"),
+        },
+    )
+    verified = await _call(
+        configured_mcp,
+        "verify_contract_change",
+        {
+            "baseline_path": str(baseline),
+            "candidate_path": str(candidate),
+            "sealed_policy_path": str(sealed["sealed_policy_path"]),
+            "output_path": str(outputs / "bundle"),
+            "visual": False,
+        },
+    )
+    bundle = Path(str(verified["bundle_path"]))
+    verdict = bundle / "core" / "verdict.json"
+    verdict.chmod(stat.S_IWRITE | stat.S_IREAD)
+    verdict.write_text("{}", encoding="utf-8")
+
+    response = await _call(configured_mcp, "verify_review_bundle", {"bundle_path": str(bundle)})
+
+    assert response == {
+        "ok": False,
+        "error_type": "BundleError",
+        "error": "review bundle verification failed",
+    }
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_an_oversized_draft_anchor_before_loading_contract(
+    configured_mcp, tmp_path: Path
+) -> None:
+    """Echoing an unbounded anchor in a canonical policy leaks the caller's contract text."""
+    sentinel = "FULL-CONTRACT-SENTINEL-" * 200
+
+    response = await _call(
+        configured_mcp,
+        "draft_contract_policy",
+        {
+            "baseline_path": str(tmp_path / "inputs" / "does-not-exist.docx"),
+            "clause_label": "Article II",
+            "heading": "Payment Terms",
+            "anchor": sentinel,
+            "before": "30 days",
+            "after": "45 days",
+            "rule_id": "payment-window",
+        },
+    )
+
+    assert response["ok"] is False
+    assert response["error_type"] == InputValidationError.__name__
+    assert sentinel not in str(response["error"])

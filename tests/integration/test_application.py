@@ -6,7 +6,7 @@ import pytest
 
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.contract import ClauseSelector
-from artifactdiff.errors import PathSafetyError
+from artifactdiff.errors import PathSafetyError, SessionError
 from artifactdiff.fs_safety import PathPolicy
 from artifactdiff.session import SealedPolicyArtifact, write_sealed_policy
 from artifactdiff.trust import TrustStore
@@ -128,3 +128,47 @@ def test_policy_validation_returns_shared_digest_and_resolved_clause_id(tmp_path
 
     assert len(validated.policy_sha256) == 64
     assert validated.resolved_clause_id.startswith("clause-")
+
+
+def test_local_verification_rejects_a_signed_policy_before_creating_output(
+    bundle_fixture: object, tmp_path: Path
+) -> None:
+    """Resolving an output before rejecting authorization lets a race create MCP-visible state."""
+    inputs = tmp_path / "inputs"
+    outputs = tmp_path / "outputs"
+    inputs.mkdir()
+    outputs.mkdir()
+    baseline = make_docx(
+        inputs / "baseline.docx",
+        heading="Payment Terms",
+        paragraphs=["Payment is due within 30 days."],
+        rows=[["Column"]],
+    )
+    candidate = make_docx(
+        inputs / "candidate.docx",
+        heading="Payment Terms",
+        paragraphs=["Payment is due within 45 days."],
+        rows=[["Column"]],
+    )
+    signed = write_sealed_policy(
+        SealedPolicyArtifact(
+            frozen=bundle_fixture.frozen, authorization=bundle_fixture.authorization
+        ),
+        inputs / "signed.json",
+    )
+    application = ArtifactDiffApplication(
+        trust_store=bundle_fixture.trust_store,
+        path_policy=PathPolicy(input_roots=(inputs,), output_roots=(outputs,)),
+    )
+    destination = outputs / "not-created" / "bundle"
+
+    with pytest.raises(SessionError, match="controlled CLI or enterprise runner"):
+        application.verify_local_change(
+            baseline,
+            candidate,
+            signed,
+            destination,
+            VerificationOptions(visual=False),
+        )
+
+    assert not destination.parent.exists()

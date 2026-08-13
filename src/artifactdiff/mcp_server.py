@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from functools import wraps
+from hashlib import sha256
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.contract import ClauseSelector
-from artifactdiff.errors import ArtifactDiffError, PathSafetyError, SessionError
+from artifactdiff.errors import (
+    ArtifactDiffError,
+    BundleError,
+    InputValidationError,
+    PathSafetyError,
+)
+from artifactdiff.fs_safety import PathPolicy
 from artifactdiff.limits import validate_source
 from artifactdiff.mcp_paths import McpRoots
 from artifactdiff.models import BlockRef, SourceDescriptor
@@ -23,6 +32,14 @@ from artifactdiff.verification.service import VerificationOptions
 _MAX_ITEMS = 20
 _MAX_PAGE_SIZE = 100
 _MAX_EXCERPT = 2_000
+_MAX_SELECTOR_LABEL = 256
+_MAX_SELECTOR_HEADING = 512
+_MAX_SELECTOR_ANCHOR = 2_000
+_MAX_ANCESTOR_ITEMS = 16
+_MAX_ANCESTOR_ITEM = 256
+_MAX_POLICY_REPLACEMENT = 4_000
+_MAX_RULE_ID = 64
+_MAX_POLICY_BYTES = 16_384
 
 
 def _error_response(error: ArtifactDiffError) -> dict[str, object]:
@@ -113,11 +130,25 @@ def _bounded_clause(value: dict[str, object]) -> dict[str, object]:
     label = value.get("label")
     return {
         "id": value.get("id"),
-        "label": label.get("normalized") if isinstance(label, dict) else None,
-        "heading": value.get("heading"),
-        "ancestor_path": value.get("ancestor_path", []),
+        "label": _bounded_text(label.get("normalized"), _MAX_SELECTOR_LABEL)
+        if isinstance(label, dict)
+        else None,
+        "heading": _bounded_text(value.get("heading"), _MAX_SELECTOR_HEADING),
+        "ancestor_path": _bounded_ancestor_path(value.get("ancestor_path")),
         "fingerprint": value.get("fingerprint"),
     }
+
+
+def _bounded_text(value: object, limit: int) -> str | None:
+    return value[:limit] if isinstance(value, str) else None
+
+
+def _bounded_ancestor_path(value: object) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [
+        item[:_MAX_ANCESTOR_ITEM] for item in value[:_MAX_ANCESTOR_ITEMS] if isinstance(item, str)
+    ]
 
 
 def _selector_candidates(inspection: dict[str, object]) -> list[dict[str, object]]:
@@ -166,6 +197,117 @@ def _with_error_boundary(
     return wrapped
 
 
+def _require_text_budget(value: str, label: str, maximum: int) -> None:
+    if len(value) > maximum:
+        raise InputValidationError(f"{label} exceeds the MCP input limit")
+
+
+def _validate_draft_request(
+    *,
+    clause_label: str,
+    heading: str,
+    anchor: str,
+    before: str,
+    after: str,
+    rule_id: str,
+    ancestor_path: list[str] | None,
+) -> None:
+    _require_text_budget(clause_label, "clause_label", _MAX_SELECTOR_LABEL)
+    _require_text_budget(heading, "heading", _MAX_SELECTOR_HEADING)
+    _require_text_budget(anchor, "anchor", _MAX_SELECTOR_ANCHOR)
+    _require_text_budget(before, "before", _MAX_POLICY_REPLACEMENT)
+    _require_text_budget(after, "after", _MAX_POLICY_REPLACEMENT)
+    _require_text_budget(rule_id, "rule_id", _MAX_RULE_ID)
+    if ancestor_path is not None:
+        if len(ancestor_path) > _MAX_ANCESTOR_ITEMS:
+            raise InputValidationError("ancestor_path exceeds the MCP input limit")
+        for item in ancestor_path:
+            _require_text_budget(item, "ancestor_path item", _MAX_ANCESTOR_ITEM)
+
+
+@dataclass(frozen=True, slots=True)
+class _GeneratedArtifact:
+    kind: str
+    path: Path
+    binding: str
+
+
+class _GeneratedArtifactRegistry:
+    """Per-server capabilities for artifacts created by this MCP instance only."""
+
+    def __init__(self, path_policy: PathPolicy) -> None:
+        self._path_policy = path_policy
+        self._records: dict[Path, _GeneratedArtifact] = {}
+
+    def register_sealed_policy(self, path: Path) -> Path:
+        resolved = self._path_policy.resolve_output_file(path)
+        self._records[resolved] = _GeneratedArtifact(
+            "sealed_policy", resolved, _file_binding(resolved)
+        )
+        return resolved
+
+    def register_bundle(self, path: Path) -> Path:
+        resolved = self._path_policy.resolve_output_directory(path)
+        self._records[resolved] = _GeneratedArtifact(
+            "review_bundle", resolved, _bundle_binding(resolved)
+        )
+        return resolved
+
+    def resolve_sealed_policy(self, path: Path) -> Path:
+        return self._resolve(path, "sealed_policy", directory=False)
+
+    def resolve_bundle(self, path: Path) -> Path:
+        return self._resolve(path, "review_bundle", directory=True)
+
+    def _resolve(self, path: Path, kind: str, *, directory: bool) -> Path:
+        try:
+            return (
+                self._path_policy.resolve_input_directory(path)
+                if directory
+                else self._path_policy.resolve_input(path)
+            )
+        except PathSafetyError:
+            resolved = (
+                self._path_policy.resolve_output_directory(path)
+                if directory
+                else self._path_policy.resolve_output_file(path)
+            )
+        record = self._records.get(resolved)
+        if record is None or record.kind != kind:
+            raise PathSafetyError("generated artifact was not created by this MCP instance")
+        actual = _bundle_binding(resolved) if directory else _file_binding(resolved)
+        if actual != record.binding:
+            raise PathSafetyError("generated artifact changed after registration")
+        return resolved
+
+
+def _file_binding(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise PathSafetyError("generated artifact is unavailable")
+    try:
+        return sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        raise PathSafetyError("generated artifact is unavailable") from None
+
+
+def _bundle_binding(path: Path) -> str:
+    complete = path / "COMPLETE"
+    manifest = path / "core" / "manifest.json"
+    if any(item.is_symlink() or not item.is_file() for item in (complete, manifest)):
+        raise PathSafetyError("generated review bundle is unavailable")
+    try:
+        marker = complete.read_bytes()
+        identity = marker.decode("ascii")
+    except (OSError, UnicodeDecodeError):
+        raise PathSafetyError("generated review bundle is unavailable") from None
+    if len(identity) != 64 or path.name != identity:
+        raise PathSafetyError("generated review bundle is unavailable")
+    try:
+        return f"{identity}:{sha256(manifest.read_bytes()).hexdigest()}"
+    except OSError:
+        raise PathSafetyError("generated review bundle is unavailable") from None
+
+
 def create_mcp(roots: McpRoots | None = None) -> FastMCP:
     """Create one MCP server whose file access is constrained to *roots*."""
     configured_roots = roots if roots is not None else McpRoots.from_environment()
@@ -175,6 +317,7 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
         if policy is not None
         else None
     )
+    generated = _GeneratedArtifactRegistry(policy) if policy is not None else None
     server = FastMCP("ArtifactDiff")
 
     def require_application() -> ArtifactDiffApplication:
@@ -183,6 +326,13 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
                 "MCP file tools are disabled until input and output roots are configured"
             )
         return application
+
+    def require_generated() -> _GeneratedArtifactRegistry:
+        if generated is None:
+            raise PathSafetyError(
+                "MCP file tools are disabled until input and output roots are configured"
+            )
+        return generated
 
     @server.tool(name="compare_documents")
     @_with_error_boundary
@@ -247,6 +397,15 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
         rule_id: str,
         ancestor_path: list[str] | None = None,
     ) -> dict[str, object]:
+        _validate_draft_request(
+            clause_label=clause_label,
+            heading=heading,
+            anchor=anchor,
+            before=before,
+            after=after,
+            rule_id=rule_id,
+            ancestor_path=ancestor_path,
+        )
         app = require_application()
         selector = ClauseSelector(
             clause_label=clause_label,
@@ -258,9 +417,15 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
             Path(baseline_path), selector, before=before, after=after, rule_id=rule_id
         )
         inspection = app.inspect_contract(Path(baseline_path), max_clauses=_MAX_ITEMS)
+        payload = policy_value.model_dump(mode="json")
+        if (
+            len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            > _MAX_POLICY_BYTES
+        ):
+            raise InputValidationError("canonical policy exceeds the MCP response limit")
         return {
             "ok": True,
-            "policy": policy_value.model_dump(mode="json"),
+            "policy": payload,
             "policy_sha256": policy_digest(policy_value),
             "selector_candidates": _selector_candidates(inspection),
             "truncated_selector_candidates": bool(inspection.get("truncated_clauses", False)),
@@ -286,7 +451,8 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
         sealed = require_application().seal_policy(
             Path(baseline_path), Path(policy_path), Path(output_path)
         )
-        return {"ok": True, "assurance": "local", "sealed_policy_path": str(sealed)}
+        registered = require_generated().register_sealed_policy(sealed)
+        return {"ok": True, "assurance": "local", "sealed_policy_path": str(registered)}
 
     @server.tool(name="verify_contract_change")
     @_with_error_boundary
@@ -298,26 +464,28 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
         visual: bool = True,
     ) -> dict[str, object]:
         app = require_application()
-        sealed = Path(sealed_policy_path)
-        if app.requires_verified_session(sealed):
-            raise SessionError(
-                "signed policies require the controlled CLI or enterprise runner; "
-                "MCP has no session or manifest-signing authority"
-            )
-        bundle = app.verify_change(
+        bundle = app.verify_local_change(
             Path(baseline_path),
             Path(candidate_path),
-            sealed,
+            Path(sealed_policy_path),
             Path(output_path),
             VerificationOptions(visual=visual),
+            sealed_policy_resolver=require_generated().resolve_sealed_policy,
         )
-        verification = app.verify_bundle(bundle)
-        effective = app.effective_verdict(bundle)
-        findings = app.list_findings(bundle)
+        registered_bundle = require_generated().register_bundle(bundle)
+        verification = app.verify_bundle(
+            registered_bundle, bundle_resolver=require_generated().resolve_bundle
+        )
+        effective = app.effective_verdict(
+            registered_bundle, bundle_resolver=require_generated().resolve_bundle
+        )
+        findings = app.list_findings(
+            registered_bundle, bundle_resolver=require_generated().resolve_bundle
+        )
         summaries = [_finding_summary(finding) for finding in findings[:_MAX_ITEMS]]
         return {
             "ok": True,
-            "bundle_path": str(bundle),
+            "bundle_path": str(registered_bundle),
             "assurance": "local",
             "raw_verdict": effective.raw_outcome.value,
             "effective_verdict": effective.outcome.value,
@@ -335,7 +503,9 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
             raise PathSafetyError("finding cursor must be zero or greater")
         if not 1 <= limit <= _MAX_PAGE_SIZE:
             raise PathSafetyError("finding limit must be between 1 and 100")
-        findings = require_application().list_findings(Path(bundle_path))
+        findings = require_application().list_findings(
+            Path(bundle_path), bundle_resolver=require_generated().resolve_bundle
+        )
         selected = findings[cursor : cursor + limit]
         return {
             "ok": True,
@@ -350,14 +520,33 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
     @server.tool(name="get_review_finding")
     @_with_error_boundary
     async def get_review_finding_tool(bundle_path: str, finding_id: str) -> dict[str, object]:
-        finding = require_application().get_finding(Path(bundle_path), finding_id)
+        finding = require_application().get_finding(
+            Path(bundle_path), finding_id, bundle_resolver=require_generated().resolve_bundle
+        )
         return {"ok": True, "finding": _finding_detail(finding)}
 
     @server.tool(name="verify_review_bundle")
     @_with_error_boundary
     async def verify_review_bundle_tool(bundle_path: str) -> dict[str, object]:
-        verification = require_application().verify_bundle(Path(bundle_path))
-        return {"ok": True, **verification.model_dump(mode="json")}
+        app = require_application()
+        verification = app.verify_bundle(
+            Path(bundle_path), bundle_resolver=require_generated().resolve_bundle
+        )
+        if not verification.valid:
+            raise BundleError("review bundle verification failed")
+        if verification.currently_trusted is False:
+            raise BundleError("review bundle trust is no longer valid")
+        effective = app.effective_verdict(
+            Path(bundle_path), bundle_resolver=require_generated().resolve_bundle
+        )
+        return {
+            "ok": True,
+            "valid": verification.valid,
+            "assurance": verification.assurance.value,
+            "signature_valid_at_creation": verification.signature_valid_at_creation,
+            "currently_trusted": verification.currently_trusted,
+            "effective_outcome": effective.outcome.value,
+        }
 
     return server
 

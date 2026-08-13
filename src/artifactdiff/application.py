@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,7 +21,7 @@ from artifactdiff.contract import (
     load_contract,
     resolve_baseline,
 )
-from artifactdiff.errors import PathSafetyError, PolicyValidationError
+from artifactdiff.errors import PolicyValidationError, SessionError
 from artifactdiff.evidence import pack_bundle
 from artifactdiff.fs_safety import PathPolicy
 from artifactdiff.normalize import sha256_file
@@ -78,25 +79,8 @@ class ArtifactDiffApplication:
     def _output(self, path: Path) -> Path:
         return self.path_policy.resolve_output(path) if self.path_policy else path
 
-    def _input_or_generated_output(self, path: Path) -> Path:
-        if self.path_policy is None:
-            return path
-        try:
-            return self.path_policy.resolve_input(path)
-        except PathSafetyError:
-            return self.path_policy.resolve_output_file(path)
-
     def _directory_input(self, path: Path) -> Path:
         return self.path_policy.resolve_input_directory(path) if self.path_policy else path
-
-    def _review_bundle_directory(self, path: Path) -> Path:
-        """Read a bundle supplied as an input or generated under the configured output roots."""
-        if self.path_policy is None:
-            return path
-        try:
-            return self.path_policy.resolve_input_directory(path)
-        except PathSafetyError:
-            return self.path_policy.resolve_output_directory(path)
 
     def _contract(self, path: Path) -> ContractDocument:
         source = self._input(path)
@@ -170,7 +154,7 @@ class ArtifactDiffApplication:
             from artifactdiff.errors import SessionError
 
             raise SessionError("verified sessions require configured path roots")
-        artifact = load_sealed_policy(self._input_or_generated_output(sealed_policy))
+        artifact = load_sealed_policy(self._input(sealed_policy))
         if artifact.authorization is None:
             from artifactdiff.errors import SessionError
 
@@ -194,13 +178,11 @@ class ArtifactDiffApplication:
         options: VerificationOptions,
         session_path: Path | None = None,
     ) -> Path:
-        from artifactdiff.errors import SessionError
-
         checked_output = self._output(output)
         verification_output = self._output(checked_output / "run")
         checked_baseline = self._input(baseline)
         checked_candidate = self._input(candidate)
-        artifact = load_sealed_policy(self._input_or_generated_output(sealed_policy))
+        artifact = load_sealed_policy(self._input(sealed_policy))
         session = (
             load_edit_session(self._directory_input(session_path), trust_store=self.trust_store)
             if session_path
@@ -234,18 +216,72 @@ class ArtifactDiffApplication:
             manifest_signer=self.manifest_signer,
         )
 
-    def requires_verified_session(self, sealed_policy: Path) -> bool:
-        """Report whether a sealed policy carries a verified authorization."""
-        return (
-            load_sealed_policy(self._input_or_generated_output(sealed_policy)).authorization
-            is not None
+    def verify_local_change(
+        self,
+        baseline: Path,
+        candidate: Path,
+        sealed_policy: Path,
+        output: Path,
+        options: VerificationOptions,
+        *,
+        sealed_policy_resolver: Callable[[Path], Path] | None = None,
+    ) -> Path:
+        """Verify a local policy after exactly one authorization-free artifact load."""
+        checked_baseline = self._input(baseline)
+        checked_candidate = self._input(candidate)
+        policy_path = (
+            sealed_policy_resolver(sealed_policy)
+            if sealed_policy_resolver is not None
+            else self._input(sealed_policy)
+        )
+        artifact = load_sealed_policy(policy_path)
+        if artifact.authorization is not None:
+            raise SessionError(
+                "signed policies require the controlled CLI or enterprise runner; "
+                "MCP has no session or manifest-signing authority"
+            )
+        checked_output = self._output(output)
+        verification_output = self._output(checked_output / "run")
+        run = verify_contract_change(
+            checked_baseline,
+            checked_candidate,
+            artifact.frozen,
+            verification_output,
+            options=options,
+        )
+        return write_review_bundle(
+            run,
+            artifact.frozen,
+            destination=checked_output,
+            assurance=BundleAssurance.LOCAL,
         )
 
-    def list_findings(self, bundle: Path) -> list[Finding]:
-        return list_findings(self._review_bundle_directory(bundle))
+    def requires_verified_session(self, sealed_policy: Path) -> bool:
+        """Report whether a sealed policy carries a verified authorization."""
+        return load_sealed_policy(self._input(sealed_policy)).authorization is not None
 
-    def get_finding(self, bundle: Path, finding_id: str) -> Finding:
-        findings = [item for item in self.list_findings(bundle) if item.id == finding_id]
+    def list_findings(
+        self, bundle: Path, *, bundle_resolver: Callable[[Path], Path] | None = None
+    ) -> list[Finding]:
+        resolved = (
+            bundle_resolver(bundle)
+            if bundle_resolver is not None
+            else self._directory_input(bundle)
+        )
+        return list_findings(resolved)
+
+    def get_finding(
+        self,
+        bundle: Path,
+        finding_id: str,
+        *,
+        bundle_resolver: Callable[[Path], Path] | None = None,
+    ) -> Finding:
+        findings = [
+            item
+            for item in self.list_findings(bundle, bundle_resolver=bundle_resolver)
+            if item.id == finding_id
+        ]
         if len(findings) != 1:
             from artifactdiff.errors import ApprovalError
 
@@ -263,16 +299,26 @@ class ArtifactDiffApplication:
             trust_store=self.trust_store,
         )
 
-    def verify_bundle(self, bundle: Path) -> BundleVerification:
-        return verify_review_bundle(
-            self._review_bundle_directory(bundle), trust_store=self.trust_store
+    def verify_bundle(
+        self, bundle: Path, *, bundle_resolver: Callable[[Path], Path] | None = None
+    ) -> BundleVerification:
+        resolved = (
+            bundle_resolver(bundle)
+            if bundle_resolver is not None
+            else self._directory_input(bundle)
         )
+        return verify_review_bundle(resolved, trust_store=self.trust_store)
 
-    def effective_verdict(self, bundle: Path) -> EffectiveVerdict:
+    def effective_verdict(
+        self, bundle: Path, *, bundle_resolver: Callable[[Path], Path] | None = None
+    ) -> EffectiveVerdict:
         """Load the fail-closed verdict after independently verifying the bundle."""
-        return load_effective_verdict(
-            self._review_bundle_directory(bundle), trust_store=self.trust_store
+        resolved = (
+            bundle_resolver(bundle)
+            if bundle_resolver is not None
+            else self._directory_input(bundle)
         )
+        return load_effective_verdict(resolved, trust_store=self.trust_store)
 
     def pack_bundle(
         self,
