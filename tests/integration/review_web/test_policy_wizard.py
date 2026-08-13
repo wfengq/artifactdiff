@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.cli import app as cli_app
 from artifactdiff.contract import ClauseSelector
-from artifactdiff.policy import ContractPolicy, canonical_policy_bytes
+from artifactdiff.policy import ContractPolicy, canonical_policy_bytes, frozen_policy_digest
 from artifactdiff.review_web.app import ReviewContext, create_review_app
+from artifactdiff.review_web.views import SelectorRequest
+from artifactdiff.session import load_sealed_policy
 from artifactdiff.trust import TrustStore
+from artifactdiff.trust.models import PolicyAuthorization, SignatureEnvelope
 from tests.factories import make_contract_docx
 from tests.review_web_client import AsgiClient
 
@@ -199,6 +205,49 @@ def test_local_seal_returns_only_the_public_sealed_artifact(tmp_path: Path) -> N
     )
 
 
+def test_verified_wizard_seal_durably_writes_an_authorized_artifact(tmp_path: Path) -> None:
+    """A verified choice must produce a sealed artifact, not an unsigned draft."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "verified-policy.json"
+
+    class Provider:
+        def sign_policy(self, frozen):
+            digest = frozen_policy_digest(frozen)
+            return PolicyAuthorization(
+                frozen_policy_sha256=digest,
+                signature=SignatureEnvelope(
+                    public_key_fingerprint="f" * 64,
+                    identity="test-authorizer",
+                    purpose="policy_authorization",
+                    canonical_object_sha256=digest,
+                    signature_base64=base64.b64encode(b"\0" * 64).decode("ascii"),
+                ),
+            )
+
+        def sign_approval(self, *_args, **_kwargs):  # pragma: no cover - protocol-only
+            raise AssertionError("not used")
+
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    app = create_review_app(
+        ReviewContext(application, "policy", baseline, Provider(), output),
+        SESSION_TOKEN,
+        CSRF_TOKEN,
+    )
+    app.state.bound_host = "127.0.0.1:8765"
+    client = AsgiClient(app, base_url=BASE_URL)
+    assert client.post(
+        "/api/session", headers={"X-ArtifactDiff-Session": SESSION_TOKEN}
+    ).status_code == 200
+    assert client.post("/api/policy", headers=_headers(), json=_payload()).status_code == 200
+
+    sealed = client.post(
+        "/api/policy/seal", headers=_headers(), json={"assurance": "verified"}
+    )
+
+    assert sealed.status_code == 200
+    assert load_sealed_policy(output).authorization is not None
+
+
 def test_policy_request_rejects_oversized_body_and_selector_collections(tmp_path: Path) -> None:
     """Browser JSON must be bounded before parsing and before selector resolution."""
     baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
@@ -340,3 +389,38 @@ def test_interactive_policy_create_configures_verified_signing_provider(
 
     assert result.exit_code == 0, result.output
     assert captured[0].signing_provider is not None
+
+
+def test_noninteractive_signing_intent_never_writes_an_unsigned_draft(tmp_path: Path) -> None:
+    """Full selector arguments plus signing flags must not silently bypass verified sealing."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "policy.json"
+    trust = tmp_path / "trust.json"
+    trust.write_text('{"schema_version":"1.0","identities":[]}', encoding="utf-8")
+    result = CliRunner().invoke(
+        cli_app,
+        [
+            "policy", "create", str(baseline), "-o", str(output),
+            "--rule-id", "payment-window", "--clause", "Article II",
+            "--heading", "Payment Terms", "--anchor", _payload()["selector"]["anchor"],
+            "--before", "30 days", "--after", "45 days",
+            "--sign", "authorizer", "--key", str(tmp_path / "key.pem"),
+            "--trust-store", str(trust),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert not output.exists()
+
+
+def test_selector_rejects_one_oversized_ancestor_string(tmp_path: Path) -> None:
+    """A short ancestor list must not carry one unbounded string through normalization."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    payload = _payload()
+    payload["selector"] = {**payload["selector"], "ancestor_path": ["x" * 513]}
+
+    with pytest.raises(ValidationError):
+        SelectorRequest.model_validate(payload["selector"])
+
+    response = _client(baseline).post("/api/policy", headers=_headers(), json=payload)
+    assert response.status_code == 422

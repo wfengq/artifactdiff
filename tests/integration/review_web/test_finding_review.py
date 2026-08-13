@@ -20,7 +20,7 @@ from artifactdiff.review_web.signing_provider import (
     FakeSigningProvider,
     InteractiveEd25519SigningProvider,
 )
-from artifactdiff.review_web.views import _crop_payloads
+from artifactdiff.review_web.views import _crop_payloads, _event_history
 from artifactdiff.trust import SignatureEnvelope, TrustRole
 from artifactdiff.verification import (
     Finding,
@@ -376,3 +376,99 @@ def test_crop_payloads_refuse_symlinked_evidence(tmp_path: Path) -> None:
     )
 
     assert _crop_payloads(tmp_path / "bundle", finding) == []
+
+
+def test_relative_bundle_root_authorizes_finding_crops(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Relative CLI bundle paths must resolve once before evidence confinement checks."""
+    finding = _finding(FindingOutcome.REVIEW, approvable=True, location="clause:relative")
+    bundle = tmp_path / "bundle"
+    root = bundle / "core" / "evidence"
+    root.mkdir(parents=True)
+    contents = b"\x89PNGrelative"
+    item = EvidenceItem(
+        kind=EvidenceKind.CHANGED_REGION,
+        path="crop.png",
+        sha256=hashlib.sha256(contents).hexdigest(),
+        size_bytes=len(contents),
+        finding_ids=[finding.id],
+    )
+    (root / "crop.png").write_bytes(contents)
+    (root / "index.json").write_bytes(
+        canonical_bytes(EvidenceIndex(mode=EvidenceMode.MINIMAL, items=[item]))
+    )
+    monkeypatch.chdir(tmp_path)
+
+    crops = _crop_payloads(Path("bundle"), finding)
+
+    assert len(crops) == 1
+
+
+def test_event_history_refuses_foreign_symlink_and_oversized_json(
+    bundle_fixture: object, tmp_path: Path
+) -> None:
+    """History must not read event-shaped JSON outside the verified bundle or above its cap."""
+    bundle = _bundle(bundle_fixture)
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text(
+        '{"sequence":99,"event_type":"finding_decision","reason":"FOREIGN"}',
+        encoding="utf-8",
+    )
+    link = bundle / "events" / "000099-approval.json"
+    try:
+        link.symlink_to(foreign)
+    except OSError:
+        pass
+    linked = _event_history(bundle)
+    if link.exists():
+        assert linked == []
+        link.unlink()
+    oversized = bundle / "events" / "000099-approval.json"
+    oversized.write_bytes(b"{" + b" " * (1024 * 1024 + 1) + b"}")
+    response = _event_history(bundle)
+
+    assert response == []
+
+
+def test_event_history_rebinds_manifest_listed_session_event(
+    bundle_fixture: object,
+) -> None:
+    """A canonical but digest-changed session event must not enter visible history."""
+    bundle = write_review_bundle(
+        **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer)
+    )
+    event_path = bundle / "events" / "000001-session-opened.json"
+    value = json.loads(event_path.read_text(encoding="utf-8"))
+    value["session_id"] = "f" * 64
+    event_path.chmod(stat.S_IWRITE)
+    event_path.write_bytes(canonical_bytes(value))
+
+    assert _event_history(bundle) == []
+
+
+def test_bundle_overview_post_verification_closes_event_read_race(
+    bundle_fixture: object, monkeypatch
+) -> None:
+    """A post-read event replacement must fail the response rather than leak stale history."""
+    bundle = write_review_bundle(
+        **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer)
+    )
+    original = _event_history
+
+    def replace_after_read(path: Path) -> list[dict[str, object]]:
+        history = original(path)
+        event_path = path / "events" / "000001-session-opened.json"
+        value = json.loads(event_path.read_text(encoding="utf-8"))
+        value["session_id"] = "e" * 64
+        event_path.chmod(stat.S_IWRITE)
+        event_path.write_bytes(canonical_bytes(value))
+        return history
+
+    monkeypatch.setattr("artifactdiff.review_web.views._event_history", replace_after_read)
+    client, _ = _client(bundle_fixture, bundle)
+
+    response = client.get("/api/bundle", headers=_headers())
+
+    assert response.status_code == 409
+    assert "event_history" not in response.text

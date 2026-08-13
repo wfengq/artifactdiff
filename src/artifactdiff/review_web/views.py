@@ -6,15 +6,17 @@ import base64
 import hashlib
 import json
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from artifactdiff.application import ArtifactDiffApplication, PolicyValidationResult
-from artifactdiff.bundle import BundleVerification
+from artifactdiff.bundle import BundleManifest, BundleVerification
+from artifactdiff.bundle.digests import canonical_bytes
 from artifactdiff.contract import ClauseSelector
 from artifactdiff.errors import ApprovalError, ArtifactDiffError, PolicyValidationError
 from artifactdiff.evidence import EvidenceIndex, EvidenceKind
@@ -27,8 +29,9 @@ from artifactdiff.policy import (
     policy_digest,
 )
 from artifactdiff.policy.models import PolicyPluginRequirement
+from artifactdiff.review import ApprovalEvent
 from artifactdiff.review_web.signing_provider import ReviewSigningProvider
-from artifactdiff.session import SealedPolicyArtifact, write_sealed_policy
+from artifactdiff.session import SealedPolicyArtifact, SessionOpenedEvent, write_sealed_policy
 from artifactdiff.verification import Finding, FindingOutcome
 
 
@@ -39,7 +42,9 @@ class _ViewModel(BaseModel):
 class SelectorRequest(_ViewModel):
     clause_label: str = Field(max_length=256)
     heading: str = Field(max_length=512)
-    ancestor_path: list[str] = Field(default_factory=list, max_length=16)
+    ancestor_path: list[Annotated[str, Field(max_length=512)]] = Field(
+        default_factory=list, max_length=16
+    )
     anchor: str = Field(min_length=1, max_length=4096)
 
 
@@ -135,7 +140,6 @@ class ReviewViews:
                     else value
                 )
         policy = ContractPolicy.model_validate(policy_payload)
-        self._validate_through_facade(policy)
         self._draft = policy
         checked = self._validate_through_facade(policy)
         return {
@@ -175,6 +179,8 @@ class ReviewViews:
         self._require_mode("bundle")
         verification = self._verified_bundle()
         effective = self.application.effective_verdict(self.target_path)
+        event_history = _event_history(self.target_path)
+        self._verified_bundle()
         return {
             "state": f"bundle-{effective.outcome.value}",
             "assurance": verification.assurance.value,
@@ -185,7 +191,7 @@ class ReviewViews:
                 "currently_trusted": verification.currently_trusted,
                 "event_chain_valid": verification.event_chain_valid,
             },
-            "event_history": _event_history(self.target_path),
+            "event_history": event_history,
         }
 
     def list_findings(self, cursor: int, limit: int) -> dict[str, object]:
@@ -323,11 +329,15 @@ def _finding_payload(finding: Finding) -> dict[str, Any]:
 
 
 def _crop_payloads(bundle: Path, finding: Finding) -> list[dict[str, str]]:
-    index = bundle / "core" / "evidence" / "index.json"
+    root = _normalized_bundle_root(bundle)
+    if root is None:
+        return []
+    index = root / "core" / "evidence" / "index.json"
     try:
-        if index.is_symlink() or index.stat().st_size > 1024 * 1024:
+        index_raw = _read_controlled_file(root, index, maximum=1024 * 1024)
+        if index_raw is None:
             return []
-        evidence = EvidenceIndex.model_validate_json(index.read_bytes())
+        evidence = EvidenceIndex.model_validate_json(index_raw)
     except (OSError, ValueError):
         return []
     linked = (
@@ -344,40 +354,15 @@ def _crop_payloads(bundle: Path, finding: Finding) -> list[dict[str, str]]:
             or total_bytes + item.size_bytes > 5 * 1024 * 1024
         ):
             break
-        path = bundle / "core" / "evidence" / Path(item.path)
-        descriptor: int | None = None
-        try:
-            if path.is_symlink() or path.resolve(strict=True) != path:
-                return []
-            before = path.stat()
-            if not path.is_file() or before.st_size != item.size_bytes:
-                return []
-            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-            descriptor = os.open(path, flags)
-            opened = os.fstat(descriptor)
-            chunks: list[bytes] = []
-            remaining = item.size_bytes + 1
-            while remaining:
-                chunk = os.read(descriptor, min(remaining, 64 * 1024))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            contents = b"".join(chunks)
-            after = path.stat()
-        except OSError:
-            return []
-        finally:
-            if descriptor is not None:
-                os.close(descriptor)
-        if (
-            len(contents) != item.size_bytes
-            or opened.st_size != item.size_bytes
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-            or before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
-            or hashlib.sha256(contents).hexdigest() != item.sha256
-        ):
+        path = root / "core" / "evidence" / Path(item.path)
+        contents = _read_controlled_file(
+            root,
+            path,
+            maximum=5 * 1024 * 1024,
+            expected_size=item.size_bytes,
+            expected_sha256=item.sha256,
+        )
+        if contents is None:
             return []
         suffix = path.suffix.casefold()
         media_type = (
@@ -399,23 +384,129 @@ def _crop_payloads(bundle: Path, finding: Finding) -> list[dict[str, str]]:
 
 
 def _event_history(bundle: Path) -> list[dict[str, object]]:
-    history: list[dict[str, object]] = []
+    root = _normalized_bundle_root(bundle)
+    if root is None:
+        return []
+    manifest_raw = _read_controlled_file(
+        root, root / "core" / "manifest.json", maximum=1024 * 1024
+    )
+    if manifest_raw is None:
+        return []
     try:
-        paths = sorted((bundle / "events").glob("*.json"))[:100]
+        manifest = BundleManifest.model_validate_json(manifest_raw)
+    except (ValidationError, RecursionError, TypeError, ValueError):
+        return []
+    if manifest_raw != canonical_bytes(manifest):
+        return []
+    expected = {item.path: item for item in manifest.payloads if item.path.startswith("events/")}
+    history: list[dict[str, object]] = []
+    total_bytes = 0
+    try:
+        paths = sorted((root / "events").glob("*.json"))[:101]
+        if len(paths) > 100:
+            return []
         for path in paths:
-            value = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(value, dict):
-                continue
+            relative = path.relative_to(root).as_posix()
+            payload = expected.get(relative)
+            if path.name == "000001-session-opened.json":
+                if payload is None:
+                    return []
+                model: type[SessionOpenedEvent | ApprovalEvent] = SessionOpenedEvent
+            elif path.name.endswith("-approval.json"):
+                model = ApprovalEvent
+            else:
+                return []
+            raw = _read_controlled_file(
+                root,
+                path,
+                maximum=256 * 1024,
+                expected_size=payload.size_bytes if payload is not None else None,
+                expected_sha256=payload.sha256 if payload is not None else None,
+            )
+            if raw is None or total_bytes + len(raw) > 2 * 1024 * 1024:
+                return []
+            value = model.model_validate_json(raw)
+            if raw != canonical_bytes(value):
+                return []
+            total_bytes += len(raw)
+            serialized = value.model_dump(mode="json")
             history.append(
                 {
-                    key: value[key]
+                    key: serialized[key]
                     for key in ("sequence", "event_type", "finding_id", "decision", "reason")
-                    if key in value
+                    if key in serialized
                 }
             )
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, ValidationError, RecursionError, TypeError, ValueError):
         return []
     return history
+
+
+def _normalized_bundle_root(bundle: Path) -> Path | None:
+    try:
+        if bundle.is_symlink():
+            return None
+        root = bundle.resolve(strict=True)
+        if not root.is_dir():
+            return None
+        return root
+    except OSError:
+        return None
+
+
+def _read_controlled_file(
+    root: Path,
+    path: Path,
+    *,
+    maximum: int,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
+) -> bytes | None:
+    descriptor: int | None = None
+    try:
+        if path.is_symlink() or path.resolve(strict=True) != path:
+            return None
+        path.relative_to(root)
+        before = path.stat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > maximum:
+            return None
+        if expected_size is not None and before.st_size != expected_size:
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            return None
+        chunks: list[bytes] = []
+        remaining = maximum + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        contents = b"".join(chunks)
+        after = path.stat()
+    except (OSError, ValueError):
+        return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if (
+        len(contents) > maximum
+        or opened.st_size != len(contents)
+        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        or before.st_size != after.st_size
+        or before.st_mtime_ns != after.st_mtime_ns
+        or (expected_size is not None and len(contents) != expected_size)
+        or (
+            expected_sha256 is not None
+            and hashlib.sha256(contents).hexdigest() != expected_sha256
+        )
+    ):
+        return None
+    return contents
 
 
 def public_view_error(error: Exception) -> tuple[int, str]:

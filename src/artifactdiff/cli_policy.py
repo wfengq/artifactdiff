@@ -53,7 +53,15 @@ def create(
         store = trust_store_from(trust_store)
         application = ArtifactDiffApplication(trust_store=store)
         missing = (rule_id, clause, heading, anchor, before, after)
-        if any(value is None for value in missing) and sys.stdin.isatty() and not no_open:
+        interactive_wizard = sys.stdin.isatty() and not no_open and (
+            any(value is None for value in missing) or sign is not None
+        )
+        if sign is not None and not interactive_wizard:
+            raise PolicyValidationError(
+                "verified policy creation requires the interactive policy wizard; "
+                "remove --no-open or use 'policy seal'"
+            )
+        if interactive_wizard:
             from artifactdiff.review_web import server as review_server
             from artifactdiff.review_web.app import ReviewContext
             from artifactdiff.review_web.signing_provider import InteractiveEd25519SigningProvider
