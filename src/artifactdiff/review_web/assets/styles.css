@@ -1,0 +1,14 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  margin: 3rem auto;
+  max-width: 42rem;
+  padding: 0 1rem;
+}
