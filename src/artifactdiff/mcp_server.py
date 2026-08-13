@@ -1,89 +1,368 @@
-"""Stdio MCP adapter for ArtifactDiff application services."""
+"""Stdio MCP adapter exposing bounded ArtifactDiff operations."""
 
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from functools import wraps
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from artifactdiff.errors import ArtifactDiffError, InputValidationError
+from artifactdiff.application import ArtifactDiffApplication
+from artifactdiff.contract import ClauseSelector
+from artifactdiff.errors import ArtifactDiffError, PathSafetyError, SessionError
 from artifactdiff.limits import validate_source
-from artifactdiff.models import SourceDescriptor
-from artifactdiff.service import (
-    CompareOptions,
-    ComparisonRun,
-    compare_documents,
-    inspect_document,
-)
+from artifactdiff.mcp_paths import McpRoots
+from artifactdiff.models import BlockRef, SourceDescriptor
+from artifactdiff.policy import policy_digest
+from artifactdiff.service import CompareOptions, ComparisonRun, compare_documents, inspect_document
+from artifactdiff.trust import TrustStore
+from artifactdiff.verification import Finding
+from artifactdiff.verification.service import VerificationOptions
 
-mcp = FastMCP("ArtifactDiff")
+_MAX_ITEMS = 20
+_MAX_PAGE_SIZE = 100
+_MAX_EXCERPT = 2_000
 
 
-def _absolute_output_dir(output_dir: str | None, before: Path, after: Path) -> Path:
+def _error_response(error: ArtifactDiffError) -> dict[str, object]:
+    return {"ok": False, "error_type": type(error).__name__, "error": str(error)}
+
+
+def _absolute_output_dir(
+    output_dir: str | None, before: Path, after: Path, *, output_root: Path
+) -> Path:
     if output_dir is not None:
         destination = Path(output_dir)
         if not destination.is_absolute():
-            raise InputValidationError(f"Output directory must be absolute: {output_dir}")
-        return destination.expanduser().resolve()
-
+            raise PathSafetyError(f"output directory must be absolute: {output_dir}")
+        return destination
     before_hash = SourceDescriptor.from_path(before).sha256[:12]
     after_hash = SourceDescriptor.from_path(after).sha256[:12]
-    return (Path.cwd() / "artifactdiff-reports" / f"{before_hash}-{after_hash}").resolve()
+    return output_root / "artifactdiff-reports" / f"{before_hash}-{after_hash}"
 
 
 def _bounded_comparison_response(run: ComparisonRun) -> dict[str, object]:
-    changes = run.result.changes[:20]
-    reports = {
-        "json": str(run.json_path.resolve()),
-        "html": str(run.html_path.resolve()) if run.html_path is not None else None,
-    }
+    changes = run.result.changes[:_MAX_ITEMS]
     return {
         "ok": True,
         "schema_version": run.result.schema_version,
         "status": run.result.status,
         "summary": run.result.summary.model_dump(mode="json"),
         "warnings": list(run.result.warnings),
-        "changes": [change.model_dump(mode="json") for change in changes],
+        "changes": [
+            {
+                "id": change.id,
+                "kind": change.kind,
+                "content_type": change.content_type,
+                "severity": change.severity,
+                "similarity": change.similarity,
+                "before": _bounded_block_reference(change.before),
+                "after": _bounded_block_reference(change.after),
+            }
+            for change in changes
+        ],
         "truncated_changes": len(run.result.changes) > len(changes),
-        "reports": reports,
+        "reports": {
+            "json": str(run.json_path.resolve()),
+            "html": str(run.html_path.resolve()) if run.html_path is not None else None,
+        },
     }
 
 
-@mcp.tool(name="compare_documents")
-async def compare_documents_tool(
-    before_path: str,
-    after_path: str,
-    output_dir: str | None = None,
-    visual: bool = True,
-    force: bool = False,
-) -> dict[str, object]:
-    """Compare two absolute local document paths and return a bounded result."""
-    try:
-        before = validate_source(Path(before_path), force=force, require_absolute=True)
-        after = validate_source(Path(after_path), force=force, require_absolute=True)
-        destination = _absolute_output_dir(output_dir, before, after)
-        run = compare_documents(
+def _bounded_block_reference(reference: BlockRef | None) -> dict[str, object] | None:
+    if reference is None:
+        return None
+    return {
+        "block_id": reference.block_id,
+        "ordinal": reference.ordinal,
+        "page_index": reference.page_index,
+    }
+
+
+def _bounded_document_inspection(inspection: dict[str, object]) -> dict[str, object]:
+    blocks = inspection.get("blocks")
+    bounded_blocks = []
+    if isinstance(blocks, list):
+        for block in blocks:
+            if isinstance(block, dict):
+                bounded_blocks.append(
+                    {
+                        "id": block.get("id"),
+                        "ordinal": block.get("ordinal"),
+                        "page_index": block.get("page_index"),
+                        "content_type": block.get("content_type"),
+                        "bbox": block.get("bbox"),
+                    }
+                )
+    warnings = inspection.get("warnings")
+    return {
+        "ok": True,
+        "path": inspection.get("path"),
+        "format": inspection.get("format"),
+        "sha256": inspection.get("sha256"),
+        "size_bytes": inspection.get("size_bytes"),
+        "page_count": inspection.get("page_count"),
+        "blocks": bounded_blocks,
+        "warnings": list(warnings) if isinstance(warnings, list) else [],
+        "truncated": bool(inspection.get("truncated", False)),
+    }
+
+
+def _bounded_clause(value: dict[str, object]) -> dict[str, object]:
+    label = value.get("label")
+    return {
+        "id": value.get("id"),
+        "label": label.get("normalized") if isinstance(label, dict) else None,
+        "heading": value.get("heading"),
+        "ancestor_path": value.get("ancestor_path", []),
+        "fingerprint": value.get("fingerprint"),
+    }
+
+
+def _selector_candidates(inspection: dict[str, object]) -> list[dict[str, object]]:
+    clauses = inspection.get("clauses", [])
+    if not isinstance(clauses, list):
+        return []
+    return [_bounded_clause(clause) for clause in clauses[:_MAX_ITEMS] if isinstance(clause, dict)]
+
+
+def _finding_summary(finding: Finding) -> dict[str, object]:
+    return {
+        "id": finding.id,
+        "rule_id": finding.rule_id,
+        "outcome": finding.outcome.value,
+        "selector_status": (
+            finding.selector_status.value if finding.selector_status is not None else None
+        ),
+        "approvable": finding.approvable,
+    }
+
+
+def _finding_detail(finding: Finding) -> dict[str, object]:
+    evidence = finding.evidence
+    return {
+        **_finding_summary(finding),
+        "location": finding.location,
+        "remediation": finding.remediation,
+        "before_excerpt": (evidence.before_excerpt or "")[:_MAX_EXCERPT],
+        "after_excerpt": (evidence.after_excerpt or "")[:_MAX_EXCERPT],
+        "crop_paths": [],
+    }
+
+
+def _with_error_boundary(
+    function: Callable[..., Awaitable[dict[str, object]]],
+) -> Callable[..., Awaitable[dict[str, object]]]:
+    """Translate only deliberately public domain errors at the MCP boundary."""
+
+    @wraps(function)
+    async def wrapped(*args: object, **kwargs: object) -> dict[str, object]:
+        try:
+            return await function(*args, **kwargs)
+        except ArtifactDiffError as error:
+            return _error_response(error)
+
+    return wrapped
+
+
+def create_mcp(roots: McpRoots | None = None) -> FastMCP:
+    """Create one MCP server whose file access is constrained to *roots*."""
+    configured_roots = roots if roots is not None else McpRoots.from_environment()
+    policy = configured_roots.path_policy() if configured_roots.enabled else None
+    application = (
+        ArtifactDiffApplication(trust_store=TrustStore(identities=[]), path_policy=policy)
+        if policy is not None
+        else None
+    )
+    server = FastMCP("ArtifactDiff")
+
+    def require_application() -> ArtifactDiffApplication:
+        if application is None:
+            raise PathSafetyError(
+                "MCP file tools are disabled until input and output roots are configured"
+            )
+        return application
+
+    @server.tool(name="compare_documents")
+    @_with_error_boundary
+    async def compare_documents_tool(
+        before_path: str,
+        after_path: str,
+        output_dir: str | None = None,
+        visual: bool = True,
+        force: bool = False,
+    ) -> dict[str, object]:
+        app = require_application()
+        before = app.path_policy.resolve_input(Path(before_path))  # type: ignore[union-attr]
+        after = app.path_policy.resolve_input(Path(after_path))  # type: ignore[union-attr]
+        destination = _absolute_output_dir(
+            output_dir,
             before,
             after,
+            output_root=app.path_policy.output_roots[0],  # type: ignore[union-attr]
+        )
+        destination = app.path_policy.resolve_output(destination)  # type: ignore[union-attr]
+        run = compare_documents(
+            validate_source(before, force=force, require_absolute=True),
+            validate_source(after, force=force, require_absolute=True),
             destination,
             options=CompareOptions(visual=visual, force=force),
         )
         return _bounded_comparison_response(run)
-    except ArtifactDiffError as error:
-        return {"ok": False, "error_type": type(error).__name__, "error": str(error)}
 
+    @server.tool(name="inspect_document")
+    @_with_error_boundary
+    async def inspect_document_tool(path: str, force: bool = False) -> dict[str, object]:
+        app = require_application()
+        source = app.path_policy.resolve_input(Path(path))  # type: ignore[union-attr]
+        inspection = inspect_document(source, force=force, require_absolute=True, max_blocks=100)
+        return _bounded_document_inspection(inspection)
 
-@mcp.tool(name="inspect_document")
-async def inspect_document_tool(path: str, force: bool = False) -> dict[str, object]:
-    """Inspect an absolute local document path and return at most 100 blocks."""
-    try:
-        inspection = inspect_document(
-            Path(path),
-            force=force,
-            require_absolute=True,
-            max_blocks=100,
+    @server.tool(name="inspect_contract")
+    @_with_error_boundary
+    async def inspect_contract_tool(path: str) -> dict[str, object]:
+        inspection = require_application().inspect_contract(Path(path), max_clauses=_MAX_ITEMS)
+        candidates = _selector_candidates(inspection)
+        source = inspection.get("source")
+        warnings = inspection.get("warnings")
+        return {
+            "ok": True,
+            "schema_version": inspection.get("schema_version"),
+            "source_sha256": source.get("sha256") if isinstance(source, dict) else None,
+            "clauses": candidates,
+            "truncated_clauses": bool(inspection.get("truncated_clauses", False)),
+            "warnings": list(warnings) if isinstance(warnings, list) else [],
+        }
+
+    @server.tool(name="draft_contract_policy")
+    @_with_error_boundary
+    async def draft_contract_policy_tool(
+        baseline_path: str,
+        clause_label: str,
+        heading: str,
+        anchor: str,
+        before: str,
+        after: str,
+        rule_id: str,
+        ancestor_path: list[str] | None = None,
+    ) -> dict[str, object]:
+        app = require_application()
+        selector = ClauseSelector(
+            clause_label=clause_label,
+            heading=heading,
+            anchor=anchor,
+            ancestor_path=tuple(ancestor_path or ()),
         )
-        return {"ok": True, **inspection}
-    except ArtifactDiffError as error:
-        return {"ok": False, "error_type": type(error).__name__, "error": str(error)}
+        policy_value = app.draft_policy(
+            Path(baseline_path), selector, before=before, after=after, rule_id=rule_id
+        )
+        inspection = app.inspect_contract(Path(baseline_path), max_clauses=_MAX_ITEMS)
+        return {
+            "ok": True,
+            "policy": policy_value.model_dump(mode="json"),
+            "policy_sha256": policy_digest(policy_value),
+            "selector_candidates": _selector_candidates(inspection),
+            "truncated_selector_candidates": bool(inspection.get("truncated_clauses", False)),
+        }
+
+    @server.tool(name="validate_contract_policy")
+    @_with_error_boundary
+    async def validate_contract_policy_tool(
+        baseline_path: str, policy_path: str
+    ) -> dict[str, object]:
+        validated = require_application().validate_policy(Path(baseline_path), Path(policy_path))
+        return {
+            "ok": True,
+            "policy_sha256": validated.policy_sha256,
+            "resolved_clause_id": validated.resolved_clause_id,
+        }
+
+    @server.tool(name="seal_local_policy")
+    @_with_error_boundary
+    async def seal_local_policy_tool(
+        baseline_path: str, policy_path: str, output_path: str
+    ) -> dict[str, object]:
+        sealed = require_application().seal_policy(
+            Path(baseline_path), Path(policy_path), Path(output_path)
+        )
+        return {"ok": True, "assurance": "local", "sealed_policy_path": str(sealed)}
+
+    @server.tool(name="verify_contract_change")
+    @_with_error_boundary
+    async def verify_contract_change_tool(
+        baseline_path: str,
+        candidate_path: str,
+        sealed_policy_path: str,
+        output_path: str,
+        visual: bool = True,
+    ) -> dict[str, object]:
+        app = require_application()
+        sealed = Path(sealed_policy_path)
+        if app.requires_verified_session(sealed):
+            raise SessionError(
+                "signed policies require the controlled CLI or enterprise runner; "
+                "MCP has no session or manifest-signing authority"
+            )
+        bundle = app.verify_change(
+            Path(baseline_path),
+            Path(candidate_path),
+            sealed,
+            Path(output_path),
+            VerificationOptions(visual=visual),
+        )
+        verification = app.verify_bundle(bundle)
+        effective = app.effective_verdict(bundle)
+        findings = app.list_findings(bundle)
+        summaries = [_finding_summary(finding) for finding in findings[:_MAX_ITEMS]]
+        return {
+            "ok": True,
+            "bundle_path": str(bundle),
+            "assurance": "local",
+            "raw_verdict": effective.raw_outcome.value,
+            "effective_verdict": effective.outcome.value,
+            "findings": summaries,
+            "truncated_findings": len(findings) > len(summaries),
+            "bundle_valid": verification.valid,
+        }
+
+    @server.tool(name="list_review_findings")
+    @_with_error_boundary
+    async def list_review_findings_tool(
+        bundle_path: str, cursor: int = 0, limit: int = _MAX_ITEMS
+    ) -> dict[str, object]:
+        if cursor < 0:
+            raise PathSafetyError("finding cursor must be zero or greater")
+        if not 1 <= limit <= _MAX_PAGE_SIZE:
+            raise PathSafetyError("finding limit must be between 1 and 100")
+        findings = require_application().list_findings(Path(bundle_path))
+        selected = findings[cursor : cursor + limit]
+        return {
+            "ok": True,
+            "findings": [_finding_summary(finding) for finding in selected],
+            "cursor": cursor,
+            "next_cursor": cursor + len(selected)
+            if cursor + len(selected) < len(findings)
+            else None,
+            "truncated": cursor + len(selected) < len(findings),
+        }
+
+    @server.tool(name="get_review_finding")
+    @_with_error_boundary
+    async def get_review_finding_tool(bundle_path: str, finding_id: str) -> dict[str, object]:
+        finding = require_application().get_finding(Path(bundle_path), finding_id)
+        return {"ok": True, "finding": _finding_detail(finding)}
+
+    @server.tool(name="verify_review_bundle")
+    @_with_error_boundary
+    async def verify_review_bundle_tool(bundle_path: str) -> dict[str, object]:
+        verification = require_application().verify_bundle(Path(bundle_path))
+        return {"ok": True, **verification.model_dump(mode="json")}
+
+    return server
+
+
+mcp = create_mcp()
 
 
 def main() -> None:
