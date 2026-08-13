@@ -6,10 +6,17 @@ from typing import NoReturn
 
 import typer
 
+from artifactdiff.cli_bundle import bundle_app
+from artifactdiff.cli_policy import policy_app
+from artifactdiff.cli_review import approve, review, verify
+from artifactdiff.cli_session import session_app
 from artifactdiff.errors import ArtifactDiffError
 from artifactdiff.service import CompareOptions, compare_documents, inspect_document
 
 app = typer.Typer(no_args_is_help=True, pretty_exceptions_show_locals=False)
+app.add_typer(policy_app, name="policy")
+app.add_typer(session_app, name="session")
+app.add_typer(bundle_app, name="bundle")
 
 
 def _exit_for_error(error: ArtifactDiffError) -> NoReturn:
@@ -65,3 +72,8 @@ def inspect_command(
         _exit_for_error(error)
 
     typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+app.command()(verify)
+app.command()(review)
+app.command()(approve)
