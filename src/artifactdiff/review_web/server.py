@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import secrets
 import socket
+import sys
 import threading
 import time
 import webbrowser
-from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import uvicorn
 
 from artifactdiff.review_web.app import ReviewContext, create_review_app
 
 _START_TIMEOUT_SECONDS = 5.0
+_IDLE_TIMEOUT_SECONDS = 300.0
 
 
 @dataclass(slots=True)
@@ -25,24 +26,53 @@ class ReviewServer:
     socket: socket.socket
     thread: threading.Thread
     _uvicorn: uvicorn.Server
+    _idle_timeout_seconds: float = _IDLE_TIMEOUT_SECONDS
     _closed: bool = False
+    _lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
+    _idle_timer: threading.Timer | None = field(default=None, repr=False)
 
-    def shutdown(self) -> None:
-        """Stop the listener once; repeat calls are safe and leave no child process."""
-        if self._closed:
-            return
-        self._closed = True
-        self._uvicorn.should_exit = True
-        self.thread.join(timeout=_START_TIMEOUT_SECONDS)
-        if self.thread.is_alive():
-            raise RuntimeError("review server did not stop")
-        self.socket.close()
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def reset_idle_timer(self) -> None:
+        """Keep the one owner-managed idle watchdog alive after valid loopback activity."""
+        with self._lock:
+            if self._closed:
+                return
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+            self._idle_timer = threading.Timer(self._idle_timeout_seconds, self.shutdown)
+            self._idle_timer.daemon = True
+            self._idle_timer.start()
+
+    def request_shutdown(self) -> None:
+        """Request shutdown from an ASGI handler without joining its own server thread."""
+        with self._lock:
+            self._uvicorn.should_exit = True
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+
+    def shutdown(self, *, timeout_seconds: float = _START_TIMEOUT_SECONDS) -> None:
+        """Stop and close once; a timeout remains retryable until cleanup completes."""
+        with self._lock:
+            if self._closed:
+                return
+            self.request_shutdown()
+            self.thread.join(timeout=timeout_seconds)
+            if self.thread.is_alive():
+                raise RuntimeError("review server did not stop")
+            self.socket.close()
+            self._closed = True
 
 
 def serve_review(context: ReviewContext, *, open_browser: bool = True) -> ReviewServer:
     """Start the local review desk and return its fragment-token launch URL."""
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
     listener.bind(("127.0.0.1", 0))
     listener.listen(socket.SOMAXCONN)
     listener.setblocking(False)
@@ -50,7 +80,13 @@ def serve_review(context: ReviewContext, *, open_browser: bool = True) -> Review
     session_token = _new_token()
     app = create_review_app(context, session_token=session_token, csrf_token=_new_token())
     app.state.bound_host = f"{host}:{port}"
-    config = uvicorn.Config(app, access_log=False, host="127.0.0.1", log_level="warning")
+    config = uvicorn.Config(
+        app,
+        access_log=False,
+        host="127.0.0.1",
+        log_level="warning",
+        proxy_headers=False,
+    )
     uvicorn_server = uvicorn.Server(config)
     thread = threading.Thread(
         target=uvicorn_server.run,
@@ -63,12 +99,15 @@ def serve_review(context: ReviewContext, *, open_browser: bool = True) -> Review
         socket=listener,
         thread=thread,
         _uvicorn=uvicorn_server,
+        _idle_timeout_seconds=_IDLE_TIMEOUT_SECONDS,
     )
     # A request handler runs on this very thread, so it may only request the
     # Uvicorn loop to exit. The owner joins and closes the listener afterwards.
-    app.state.shutdown_callback = _request_shutdown(uvicorn_server)
+    app.state.shutdown_callback = review_server.request_shutdown
+    app.state.activity_callback = review_server.reset_idle_timer
     thread.start()
     _wait_until_started(uvicorn_server, review_server)
+    review_server.reset_idle_timer()
     print(review_server.url, flush=True)
     if open_browser:
         webbrowser.open(review_server.url)
@@ -89,10 +128,3 @@ def _wait_until_started(server: uvicorn.Server, review_server: ReviewServer) -> 
             review_server.shutdown()
             raise RuntimeError("review server did not start")
         time.sleep(0.01)
-
-
-def _request_shutdown(server: uvicorn.Server) -> Callable[[], None]:
-    def request_shutdown() -> None:
-        server.should_exit = True
-
-    return request_shutdown

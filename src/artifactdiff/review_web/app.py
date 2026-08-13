@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hmac
 import re
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 
@@ -59,6 +60,7 @@ class _SessionState:
     csrf_token: str
     exchanged: bool = False
     shutdown_used: bool = False
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
 
 class _LoopbackSecurityMiddleware:
@@ -86,6 +88,9 @@ class _LoopbackSecurityMiddleware:
         if not _is_exact_loopback_request(scope):
             await PlainTextResponse("invalid host", status_code=400)(scope, receive, secure_send)
             return
+        activity_callback = scope["app"].state.activity_callback
+        if callable(activity_callback):
+            activity_callback()
         await self.app(scope, receive, secure_send)
 
 
@@ -125,11 +130,14 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
         return _asset_response(name, media_type)
 
     async def establish_session(request: Request) -> Response:
-        if request.query_params or not _matches(
-            request.headers.get("x-artifactdiff-session"), state.session_token
-        ):
-            return PlainTextResponse("forbidden", status_code=403)
-        state.exchanged = True
+        with state.lock:
+            if (
+                state.exchanged
+                or request.query_params
+                or not _matches(request.headers.get("x-artifactdiff-session"), state.session_token)
+            ):
+                return PlainTextResponse("forbidden", status_code=403)
+            state.exchanged = True
         return JSONResponse({"csrf_token": state.csrf_token})
 
     async def protected(request: Request) -> Response:
@@ -166,6 +174,7 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
     )
     app.state.bound_host = None
     app.state.shutdown_callback = None
+    app.state.activity_callback = None
     # Starlette's server-error middleware otherwise sits outside user
     # middleware. Wrap the completed stack so even an unexpected 500 carries
     # the same fail-closed response headers.

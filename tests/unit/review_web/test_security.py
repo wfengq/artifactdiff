@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from subprocess import run
 
 import pytest
 from starlette.responses import Response
-from starlette.testclient import TestClient
 
 import artifactdiff.review_web.app as review_app
 from artifactdiff.review_web.app import ReviewContext, create_review_app
+from tests.review_web_client import AsgiClient
 
 SESSION_TOKEN = "a" * 43
 CSRF_TOKEN = "b" * 43
@@ -19,7 +20,7 @@ CSP = (
 
 
 @pytest.fixture
-def client(tmp_path: Path) -> TestClient:
+def client(tmp_path: Path) -> AsgiClient:
     app = create_review_app(
         ReviewContext(
             application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
@@ -28,8 +29,7 @@ def client(tmp_path: Path) -> TestClient:
         CSRF_TOKEN,
     )
     app.state.bound_host = "127.0.0.1:8765"
-    with TestClient(app, base_url=LOOPBACK_ORIGIN) as test_client:
-        yield test_client
+    yield AsgiClient(app, base_url=LOOPBACK_ORIGIN)
 
 
 def assert_security_headers(response: object) -> None:
@@ -41,7 +41,7 @@ def assert_security_headers(response: object) -> None:
     assert headers["cross-origin-resource-policy"] == "same-origin"
 
 
-def test_shell_contains_no_sensitive_data_and_sets_strict_headers(client: TestClient) -> None:
+def test_shell_contains_no_sensitive_data_and_sets_strict_headers(client: AsgiClient) -> None:
     """Dropping a source, credential, or a security header from the shell is unsafe."""
     response = client.get("/")
 
@@ -51,8 +51,61 @@ def test_shell_contains_no_sensitive_data_and_sets_strict_headers(client: TestCl
     assert_security_headers(response)
 
 
+def test_classic_bootstrap_script_executes_and_reports_missing_fragment_token() -> None:
+    """A top-level await in a classic script prevents every browser bootstrap from running."""
+    asset = Path(review_app.__file__).with_name("assets") / "app.js"
+    program = """
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const status = { textContent: "", setAttribute() {} };
+const context = {
+  URLSearchParams, location: { hash: "", pathname: "/" },
+  history: { replaceState() {} },
+  document: { getElementById() { return status; } },
+  fetch() { throw new Error("fetch must not run without a token"); },
+  console,
+};
+vm.runInNewContext(source, context);
+setImmediate(() => {
+  if (status.textContent !== "Unable to connect to the local review desk.") process.exit(1);
+});
+"""
+
+    result = run(["node", "-e", program, str(asset)], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_bootstrap_does_not_parse_a_failed_session_exchange_as_json() -> None:
+    """Calling json() on an HTML 403 hides the connection failure and rejects bootstrap."""
+    asset = Path(review_app.__file__).with_name("assets") / "app.js"
+    program = """
+const fs = require("fs");
+const vm = require("vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const status = { textContent: "", setAttribute() {} };
+let parsed = false;
+const context = {
+  URLSearchParams, location: { hash: "#token=" + "a".repeat(43), pathname: "/" },
+  history: { replaceState() {} },
+  document: { getElementById() { return status; } },
+  fetch() { return Promise.resolve({ ok: false, json() { parsed = true; throw new Error("no json"); } }); },
+  console,
+};
+vm.runInNewContext(source, context);
+setTimeout(() => {
+  if (parsed || status.textContent !== "Unable to connect to the local review desk.") process.exit(1);
+}, 20);
+"""
+
+    result = run(["node", "-e", program, str(asset)], capture_output=True, text=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("path", ["/assets/app.js", "/assets/styles.css", "/not-a-route"])
-def test_assets_and_errors_receive_the_same_security_headers(client: TestClient, path: str) -> None:
+def test_assets_and_errors_receive_the_same_security_headers(client: AsgiClient, path: str) -> None:
     """A missed static or error response would leave an exploitable weak response."""
     response = client.get(path)
 
@@ -78,8 +131,8 @@ def test_unexpected_errors_retain_security_headers(
         raise RuntimeError("test error")
 
     monkeypatch.setattr(review_app, "_asset_response", broken_asset)
-    with TestClient(app, base_url=LOOPBACK_ORIGIN, raise_server_exceptions=False) as error_client:
-        response = error_client.get("/")
+    error_client = AsgiClient(app, base_url=LOOPBACK_ORIGIN, raise_server_exceptions=False)
+    response = error_client.get("/")
 
     assert response.status_code == 500
     assert_security_headers(response)
@@ -95,7 +148,7 @@ def test_unexpected_errors_retain_security_headers(
         "127.0.0.1:8766",
     ],
 )
-def test_host_must_match_the_bound_ipv4_loopback_address(client: TestClient, host: str) -> None:
+def test_host_must_match_the_bound_ipv4_loopback_address(client: AsgiClient, host: str) -> None:
     """Accepting an alias, an IPv6 address, or another port defeats the local boundary."""
     response = client.get("/", headers={"Host": host})
 
@@ -103,7 +156,7 @@ def test_host_must_match_the_bound_ipv4_loopback_address(client: TestClient, hos
     assert_security_headers(response)
 
 
-def test_forwarded_headers_are_rejected_even_with_the_correct_host(client: TestClient) -> None:
+def test_forwarded_headers_are_rejected_even_with_the_correct_host(client: AsgiClient) -> None:
     """Trusting proxy-supplied origin information could bypass direct loopback validation."""
     response = client.get("/", headers={"Forwarded": "host=attacker.invalid"})
 
@@ -111,7 +164,7 @@ def test_forwarded_headers_are_rejected_even_with_the_correct_host(client: TestC
     assert_security_headers(response)
 
 
-def test_api_route_is_unavailable_without_both_exchanged_tokens(client: TestClient) -> None:
+def test_api_route_is_unavailable_without_both_exchanged_tokens(client: AsgiClient) -> None:
     """A placeholder must not become an unauthenticated data endpoint in Task 4."""
     no_tokens = client.get("/api/policy")
     missing_csrf = client.get("/api/policy", headers={"X-ArtifactDiff-Session": SESSION_TOKEN})
