@@ -25,13 +25,13 @@ from tests.factories import make_docx
 runner = CliRunner()
 
 
-def test_review_is_a_discoverable_lazy_adapter_boundary() -> None:
-    """Replacing the deferred desk boundary with a traceback leaks implementation state."""
+def test_review_requires_a_bundle_without_leaking_adapter_state() -> None:
+    """Starting a review without its system-of-record bundle must remain a public error."""
     result = runner.invoke(app, ["review", "--no-open"])
 
     assert result.exit_code == 2
     assert "Traceback" not in result.output
-    assert "not available" in result.stderr
+    assert "review bundle is required" in result.stderr
 
 
 def test_private_key_prompt_is_directed_to_stderr_for_json_commands(monkeypatch) -> None:

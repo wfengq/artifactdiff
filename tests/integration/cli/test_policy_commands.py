@@ -184,7 +184,7 @@ def test_policy_create_prompts_each_missing_field_once_and_writes_a_valid_policy
     monkeypatch.setattr("artifactdiff.cli_policy.typer.prompt", prompted)
     result = runner.invoke(
         app,
-        ["policy", "create", str(baseline), "--output", str(policy)],
+        ["policy", "create", str(baseline), "--output", str(policy), "--no-open"],
         input="\n".join(answers) + "\n",
     )
 

@@ -6,10 +6,75 @@
     <title>ArtifactDiff Review Desk</title>
     <link rel="stylesheet" href="/assets/styles.css">
   </head>
-  <body>
-    <main>
-      <h1>ArtifactDiff Review Desk</h1>
+  <body data-state="connecting">
+    <header>
+      <p class="eyebrow">Local · Offline · Fail-closed</p>
+      <h1>ArtifactDiff Contract Review Desk</h1>
+      <p id="assurance" class="assurance">Assurance: loading</p>
+    </header>
+    <main id="workspace" tabindex="-1">
       <p id="status" role="status" aria-live="polite">Connecting to the local review desk.</p>
+      <section id="policy-panel" hidden aria-labelledby="policy-heading">
+        <h2 id="policy-heading">Pre-edit policy</h2>
+        <form id="policy-form">
+          <label>Rule ID <input name="rule_id" required pattern="[a-z][a-z0-9-]{0,63}"></label>
+          <label>Clause <input name="clause_label" required></label>
+          <label>Heading <input name="heading" required></label>
+          <label>Exact anchor <textarea name="anchor" required></textarea></label>
+          <label>Before <textarea name="before" required></textarea></label>
+          <label>After <textarea name="after" required></textarea></label>
+          <fieldset>
+            <legend>Protected contract-safe targets</legend>
+            <label><input type="checkbox" name="protect" value="parties" checked> Parties</label>
+            <label><input type="checkbox" name="protect" value="money" checked> Money</label>
+            <label><input type="checkbox" name="protect" value="currency" checked> Currency</label>
+            <label><input type="checkbox" name="protect" value="dates" checked> Dates</label>
+            <label><input type="checkbox" name="protect" value="durations" checked> Durations</label>
+            <label><input type="checkbox" name="protect" value="percentages" checked> Percentages</label>
+            <label><input type="checkbox" name="protect" value="headers" checked> Headers</label>
+            <label><input type="checkbox" name="protect" value="footers" checked> Footers</label>
+            <label><input type="checkbox" name="protect" value="signatures" checked> Signatures</label>
+            <label><input type="checkbox" name="protect" value="seals" checked> Seals</label>
+            <label><input type="checkbox" name="protect" value="attachments" checked> Attachments</label>
+          </fieldset>
+          <label>Metadata behavior <select name="metadata"><option value="review">Review</option><option value="ignore">Ignore (relaxation)</option></select></label>
+          <label>Pagination reflow <select name="pagination"><option value="review">Review</option><option value="fail">Fail</option></select></label>
+          <label>Visual unavailable <select name="visual_unavailable"><option value="review">Review</option><option value="fail">Fail</option></select></label>
+          <label>Evidence mode <select name="evidence"><option value="minimal">Minimal</option><option value="full">Full</option><option value="sealed">Sealed</option></select></label>
+          <label>Required plugins (JSON object) <textarea name="plugins">{}</textarea></label>
+          <button type="submit">Review canonical policy</button>
+        </form>
+        <section aria-labelledby="relaxations-heading">
+          <h3 id="relaxations-heading">Relaxations from contract-safe</h3>
+          <ul id="relaxations"></ul>
+        </section>
+        <pre id="policy-summary"></pre>
+        <button id="freeze-policy" type="button" disabled>Freeze local policy</button>
+      </section>
+      <section id="bundle-panel" hidden aria-labelledby="bundle-heading">
+        <h2 id="bundle-heading">Findings</h2>
+        <div class="verdicts"><p id="raw-verdict"></p><p id="effective-verdict" aria-live="polite"></p></div>
+        <p id="signature-status"></p>
+        <h3>Signed event history</h3><ol id="event-history"></ol>
+        <nav aria-label="Finding navigation">
+          <button id="previous-finding" type="button">Previous finding</button>
+          <button id="next-finding" type="button">Next finding</button>
+        </nav>
+        <ol id="finding-list"></ol>
+        <article id="finding-detail" tabindex="-1">
+          <h3 id="finding-title">Select a finding</h3>
+          <p id="finding-rule"></p><p id="finding-selector"></p>
+          <h4>Before</h4><pre id="before-excerpt"></pre>
+          <h4>After</h4><pre id="after-excerpt"></pre>
+          <p id="finding-remediation"></p>
+          <h4>Linked page crops</h4><ul id="visual-evidence"></ul>
+          <form id="approval-form" hidden>
+            <label>Approval reason <textarea name="reason" required minlength="3"></textarea></label>
+            <button type="submit">Sign approval for this finding</button>
+          </form>
+        </article>
+      </section>
+      <button id="shutdown" type="button">Close review desk</button>
     </main>
     <script src="/assets/app.js"></script>
   </body>

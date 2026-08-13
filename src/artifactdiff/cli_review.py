@@ -82,10 +82,38 @@ def verify(
 def review(
     bundle: Path | None = typer.Argument(None),
     no_open: bool = typer.Option(False, "--no-open"),
+    sign: str | None = typer.Option(None, "--sign"),
+    key: Path | None = typer.Option(None, "--key"),
+    trust_store: Path | None = typer.Option(None, "--trust-store"),
 ) -> None:
-    """Reserve the local review-desk command until its loopback adapter is installed."""
-    del bundle, no_open
-    exit_for_error(SessionError("local review desk adapter is not available"))
+    """Open the authenticated local desk for one immutable Review Bundle."""
+    try:
+        if bundle is None:
+            raise SessionError("review bundle is required")
+        if (sign is None) != (key is None) or (sign is not None and trust_store is None):
+            raise SessionError("--sign and --key require each other and --trust-store")
+        store = trust_store_from(trust_store)
+        application = ArtifactDiffApplication(trust_store=store)
+        signing_provider = None
+        if sign is not None and key is not None:
+            from artifactdiff.review_web.signing_provider import (
+                InteractiveEd25519SigningProvider,
+            )
+
+            signing_provider = InteractiveEd25519SigningProvider(application, sign, key, store)
+        from artifactdiff.review_web import server as review_server
+        from artifactdiff.review_web.app import ReviewContext
+
+        server = review_server.serve_review(
+            ReviewContext(application, "bundle", bundle, signing_provider),
+            open_browser=not no_open,
+        )
+        try:
+            server.thread.join()
+        finally:
+            server.shutdown()
+    except ArtifactDiffError as error:
+        exit_for_error(error)
 
 
 def approve(

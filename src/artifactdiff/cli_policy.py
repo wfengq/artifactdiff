@@ -35,12 +35,34 @@ def create(
     before: str | None = typer.Option(None, "--before"),
     after: str | None = typer.Option(None, "--after"),
     force_output: bool = typer.Option(False, "--force-output"),
+    no_open: bool = typer.Option(False, "--no-open"),
 ) -> None:
     """Draft one contract-safe exact replacement policy."""
     try:
         if output.exists() and not force_output:
             raise PolicyValidationError("policy output already exists; use --force-output")
         application = ArtifactDiffApplication(trust_store=trust_store_from(None))
+        missing = (rule_id, clause, heading, anchor, before, after)
+        if any(value is None for value in missing) and sys.stdin.isatty() and not no_open:
+            from artifactdiff.review_web import server as review_server
+            from artifactdiff.review_web.app import ReviewContext
+
+            server = review_server.serve_review(
+                ReviewContext(
+                    application,
+                    "policy",
+                    baseline,
+                    None,
+                    output_path=output,
+                ),
+                open_browser=True,
+            )
+            try:
+                server.thread.join()
+            finally:
+                server.shutdown()
+            typer.echo(str(output.resolve()))
+            return
         policy = application.draft_policy(
             baseline,
             ClauseSelector(

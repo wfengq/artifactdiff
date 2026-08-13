@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hmac
+import json
 import re
 import threading
 from dataclasses import dataclass, field
 from importlib.resources import files
 from pathlib import Path
 
+from pydantic import ValidationError
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, Response
@@ -16,7 +18,9 @@ from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from artifactdiff.application import ArtifactDiffApplication
-from artifactdiff.trust import SigningProvider
+from artifactdiff.errors import ArtifactDiffError
+from artifactdiff.review_web.signing_provider import ReviewSigningProvider
+from artifactdiff.review_web.views import ReviewViews, public_view_error
 
 _CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -51,7 +55,8 @@ class ReviewContext:
     application: ArtifactDiffApplication
     mode: str
     target_path: Path
-    signing_provider: SigningProvider | None
+    signing_provider: ReviewSigningProvider | None
+    output_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -111,10 +116,16 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
     ``bound_host`` remains unset until :func:`serve_review` binds the IPv4
     socket, so an app constructed outside that lifecycle refuses all requests.
     """
-    del context
     if _SESSION_TOKEN_PATTERN.fullmatch(session_token) is None:
         raise ValueError("review session token must be a 43-character base64url token")
     state = _SessionState(session_token=session_token, csrf_token=csrf_token)
+    views = ReviewViews(
+        context.application,
+        context.mode,
+        context.target_path,
+        context.signing_provider,
+        context.output_path,
+    )
 
     async def shell(_: Request) -> Response:
         response = _asset_response("index.html", "text/html; charset=utf-8")
@@ -158,7 +169,33 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
             if callable(callback):
                 callback()
             return JSONResponse({"status": "shutting_down"})
-        return JSONResponse({"detail": "review view is not installed"}, status_code=501)
+        if not isinstance(context.application, ArtifactDiffApplication):
+            return JSONResponse({"detail": "review view is not installed"}, status_code=501)
+        try:
+            path = request.url.path
+            if path == "/api/policy" and request.method == "GET":
+                payload = views.policy_overview()
+            elif path == "/api/policy":
+                payload = views.draft_policy(await request.json())
+            elif path == "/api/policy/seal":
+                payload = views.seal_policy(await request.json())
+            elif path == "/api/bundle":
+                payload = views.bundle_overview()
+            elif path == "/api/findings":
+                payload = views.list_findings(
+                    int(request.query_params.get("cursor", "0")),
+                    int(request.query_params.get("limit", "20")),
+                )
+            elif path.startswith("/api/findings/"):
+                payload = views.finding(request.path_params["id"])
+            elif path == "/api/approvals":
+                payload = views.approve(await request.json())
+            else:
+                return JSONResponse({"error": "not found"}, status_code=404)
+        except (ArtifactDiffError, ValidationError, ValueError, json.JSONDecodeError) as error:
+            status, message = public_view_error(error)
+            return JSONResponse({"error": message}, status_code=status)
+        return JSONResponse(payload)
 
     app = Starlette(
         debug=False,
