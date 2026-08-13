@@ -14,8 +14,14 @@ from pydantic import ValidationError
 from artifactdiff.bundle.digests import canonical_bytes, canonical_digest, canonical_file_digest
 from artifactdiff.bundle.models import BundleAssurance, BundleManifest, BundlePayload
 from artifactdiff.errors import BundleError
+from artifactdiff.evidence.models import EvidenceIndex
 from artifactdiff.models import ComparisonResult
-from artifactdiff.policy import FrozenPolicy, frozen_policy_digest, validate_frozen_policy_integrity
+from artifactdiff.policy import (
+    EvidenceMode,
+    FrozenPolicy,
+    frozen_policy_digest,
+    validate_frozen_policy_integrity,
+)
 from artifactdiff.session import SessionOpenedEvent
 from artifactdiff.trust import PolicyAuthorization, SignatureEnvelope, SigningProvider, TrustRole
 from artifactdiff.verification.models import ContractChangeSet, RawVerdict
@@ -139,6 +145,64 @@ def _payload(root: Path, relative: str) -> BundlePayload:
     )
 
 
+def _checked_evidence(evidence: Path | None) -> tuple[EvidenceIndex, Path | None]:
+    if evidence is None:
+        return EvidenceIndex(mode=EvidenceMode.MINIMAL, items=[]), None
+    try:
+        if evidence.is_symlink() or not evidence.is_dir():
+            raise BundleError("evidence directory is invalid")
+        root = evidence.resolve(strict=True)
+        index_path = root / "index.json"
+        if (
+            index_path.is_symlink()
+            or not index_path.is_file()
+            or index_path.stat().st_size > 10 * 1024 * 1024
+        ):
+            raise BundleError("evidence index is invalid")
+        raw = index_path.read_bytes()
+        index = EvidenceIndex.model_validate_json(raw)
+        if raw != canonical_bytes(index):
+            raise BundleError("evidence index is not canonical")
+        expected = {item.path for item in index.items}
+        if "index.json" in expected:
+            raise BundleError("evidence index cannot reference itself")
+        actual: set[str] = set()
+        for path in root.rglob("*"):
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise BundleError("evidence directory contains an unsafe path")
+            if path.is_file() and path != index_path:
+                actual.add(path.relative_to(root).as_posix())
+        if actual != expected:
+            raise BundleError("evidence file set does not match index")
+        for item in index.items:
+            path = root / Path(item.path)
+            if (
+                path.resolve(strict=True) != path
+                or path.stat().st_size != item.size_bytes
+                or canonical_file_digest(path) != item.sha256
+            ):
+                raise BundleError("evidence payload does not match index")
+        return index, root
+    except BundleError:
+        raise
+    except (OSError, ValidationError, RecursionError, TypeError, ValueError):
+        raise BundleError("evidence directory is invalid") from None
+
+
+def _copy_evidence(source: Path, destination: Path) -> None:
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+            output_stream.flush()
+            try:
+                os.fsync(output_stream.fileno())
+            except OSError:
+                pass
+    except OSError:
+        raise BundleError("unable to copy evidence payload") from None
+
+
 def _remove_tree(path: Path) -> None:
     if not path.exists():
         return
@@ -167,6 +231,7 @@ def write_review_bundle(
     policy_authorization: PolicyAuthorization | None = None,
     session_event: SessionOpenedEvent | None = None,
     manifest_signer: SigningProvider | None = None,
+    evidence: Path | None = None,
 ) -> Path:
     """Write a new immutable bundle and publish it under its manifest digest."""
     try:
@@ -177,6 +242,7 @@ def write_review_bundle(
     if checked_assurance is BundleAssurance.ENTERPRISE:
         raise BundleError("enterprise assurance requires an enterprise identity adapter")
     verdict, facts, comparison = _checked_run(run, checked_frozen)
+    evidence_index, evidence_root = _checked_evidence(evidence)
     frozen_digest = frozen_policy_digest(checked_frozen)
     verified = checked_assurance is BundleAssurance.VERIFIED
     if verified and manifest_signer is None:
@@ -221,10 +287,24 @@ def write_review_bundle(
         _write(core / "comparison.json", comparison)
         _write(core / "facts.json", facts)
         _write(core / "verdict.json", verdict)
-        _write(core / "evidence" / "index.json", {"schema_version": "1.0", "items": []})
+        _write(core / "evidence" / "index.json", evidence_index)
+        for item in evidence_index.items:
+            if evidence_root is None:
+                raise BundleError("evidence payload root is unavailable")
+            copied_evidence = core / "evidence" / Path(item.path)
+            _copy_evidence(
+                evidence_root / Path(item.path),
+                copied_evidence,
+            )
+            if (
+                copied_evidence.stat().st_size != item.size_bytes
+                or canonical_file_digest(copied_evidence) != item.sha256
+            ):
+                raise BundleError("copied evidence payload does not match index")
         environment = {"engine_version": comparison.engine_version}
         _write(core / "environment.json", environment)
         relative_payloads = set(_CORE_FILES)
+        relative_payloads.update(f"core/evidence/{item.path}" for item in evidence_index.items)
         event_chain_head: str | None = None
         if checked_authorization is not None and checked_session_event is not None:
             _write(core / "policy.sig", checked_authorization)

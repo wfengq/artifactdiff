@@ -15,6 +15,7 @@ from artifactdiff.bundle.models import (
     validate_bundle_path,
 )
 from artifactdiff.errors import BundleError, PolicyValidationError
+from artifactdiff.evidence.models import EvidenceIndex
 from artifactdiff.models import ComparisonResult
 from artifactdiff.policy import FrozenPolicy, frozen_policy_digest, validate_frozen_policy_integrity
 from artifactdiff.session import SessionOpenedEvent
@@ -140,6 +141,13 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
             raise BundleError("bundle_manifest_invalid")
         manifest = manifest_value
         assurance = manifest.assurance
+        evidence_value = _load_canonical(
+            root / "core" / "evidence" / "index.json",
+            EvidenceIndex,
+        )
+        if not isinstance(evidence_value, EvidenceIndex):
+            raise BundleError("bundle_schema_invalid")
+        evidence_index = evidence_value
         if assurance is BundleAssurance.ENTERPRISE:
             errors.append("enterprise_assurance_adapter_unavailable")
         manifest_digest = canonical_digest(manifest)
@@ -149,6 +157,7 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
 
         listed = {item.path for item in manifest.payloads}
         expected = set(_LOCAL_CORE)
+        expected.update(f"core/evidence/{item.path}" for item in evidence_index.items)
         verified = assurance is not BundleAssurance.LOCAL
         if verified:
             expected.update({"core/policy.sig", "events/000001-session-opened.json"})
@@ -164,6 +173,15 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
                     errors.append("payload_digest_mismatch")
             except BundleError as error:
                 errors.append(str(error))
+        payloads_by_path = {item.path: item for item in manifest.payloads}
+        for evidence_item in evidence_index.items:
+            payload = payloads_by_path.get(f"core/evidence/{evidence_item.path}")
+            if (
+                payload is None
+                or payload.sha256 != evidence_item.sha256
+                or payload.size_bytes != evidence_item.size_bytes
+            ):
+                errors.append("evidence_index_digest_mismatch")
 
         actual_core = {
             path.relative_to(root).as_posix()
@@ -212,18 +230,11 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
             errors.append("bundle_cross_digest_invalid")
 
         environment_raw = _read(root / "core" / "environment.json")
-        evidence_raw = _read(root / "core" / "evidence" / "index.json")
         try:
             environment = json.loads(environment_raw)
-            evidence = json.loads(evidence_raw)
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise BundleError("bundle_schema_invalid") from None
-        if (
-            environment_raw != canonical_bytes(environment)
-            or environment != manifest.environment
-            or evidence_raw != canonical_bytes(evidence)
-            or evidence != {"items": [], "schema_version": "1.0"}
-        ):
+        if environment_raw != canonical_bytes(environment) or environment != manifest.environment:
             errors.append("bundle_metadata_invalid")
 
         manifest_signature_path = root / "core" / "manifest.sig"

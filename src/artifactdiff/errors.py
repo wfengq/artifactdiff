@@ -43,3 +43,11 @@ class BundleError(ArtifactDiffError):
 
 class ApprovalError(ArtifactDiffError):
     """Raised when a finding decision cannot be safely appended or verified."""
+
+
+class EvidenceError(ArtifactDiffError):
+    """Raised when evidence cannot be collected or archived safely."""
+
+
+class EncryptionUnavailableError(EvidenceError):
+    """Raised when the configured age encryption provider is unavailable."""

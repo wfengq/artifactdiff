@@ -2,7 +2,7 @@
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from shutil import copy2, rmtree
 from tempfile import TemporaryDirectory, mkdtemp
@@ -172,6 +172,12 @@ def _compare_visual_pages(
                 }
             )
             copied = _copy_visual_assets(temporary_assets, output_dir / "visual" / key)
+            if contract_coordinates:
+                copied = replace(
+                    copied,
+                    document_width=max(left.width, right.width),
+                    document_height=max(left.height, right.height),
+                )
         visual_changes.append(visual)
         assets[key] = copied
     return VisualComparison(

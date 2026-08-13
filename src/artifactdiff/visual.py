@@ -16,6 +16,8 @@ class VisualAssets:
     before_image: Path
     after_image: Path
     heatmap_image: Path
+    document_width: float | None = None
+    document_height: float | None = None
 
 
 def compare_images(
