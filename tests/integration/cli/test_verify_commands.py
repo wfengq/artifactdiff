@@ -137,9 +137,15 @@ def test_session_open_rejects_invalid_verified_session_inputs_without_creating_w
     bundle_fixture: object, tmp_path, case: str
 ) -> None:
     """Opening a workspace for an invalid policy, baseline, or signer would bypass session controls."""
-    baseline = tmp_path / "baseline.docx"
-    baseline.write_bytes(b"different baseline")
-    policy = tmp_path / "sealed.json"
+    input_root = tmp_path / "inputs"
+    input_root.mkdir()
+    baseline = input_root / "baseline.docx"
+    baseline.write_bytes(
+        b"different baseline"
+        if case == "wrong-baseline"
+        else b"ArtifactDiff immutable review bundle baseline\n"
+    )
+    policy = input_root / "sealed.json"
     authorization = bundle_fixture.authorization
     if case == "bad-signature":
         authorization = authorization.model_copy(
@@ -154,9 +160,11 @@ def test_session_open_rejects_invalid_verified_session_inputs_without_creating_w
         authorization=None if case == "local" else authorization,
     )
     write_sealed_policy(artifact, policy)
-    trust_store = tmp_path / "trust.json"
+    trust_store = input_root / "trust.json"
     trust_store.write_text(bundle_fixture.trust_store.model_dump_json(), encoding="utf-8")
-    output = tmp_path / "sessions"
+    output_root = tmp_path / "output-root"
+    output_root.mkdir()
+    output = output_root / "sessions"
     output.mkdir()
     identity = (
         "bundle-policy-authorizer" if case == "wrong-signer-role" else "bundle-archive-signer"
@@ -183,6 +191,10 @@ def test_session_open_rejects_invalid_verified_session_inputs_without_creating_w
 
     assert result.exit_code == 2
     assert "Traceback" not in result.output
+    if case == "wrong-signer-role":
+        # This case deliberately reaches LocalEd25519SigningProvider's role
+        # guard: the frozen baseline and authorization are both otherwise valid.
+        assert "signing identity lacks the required current role" in result.output
     assert list(output.iterdir()) == []
 
 
@@ -261,9 +273,6 @@ def test_verified_verify_json_is_one_stdout_document(tmp_path, monkeypatch) -> N
         )
     )
     monkeypatch.setattr("typer.testing._NamedTextIOWrapper.isatty", lambda _self: True)
-    monkeypatch.setattr(
-        "artifactdiff.cli_support.typer.prompt", lambda *_args, **_kwargs: "passphrase"
-    )
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     session_root = outputs / "session-root"
@@ -285,16 +294,25 @@ def test_verified_verify_json_is_one_stdout_document(tmp_path, monkeypatch) -> N
             "--trust-store",
             str(trust_path),
         ],
+        input="passphrase\n",
     )
 
     assert opened.exit_code == 0, opened.output
-    candidate = Path(opened.stdout.splitlines()[0])
+    assert "Passphrase for archive-signer" in opened.stderr
+    assert "Passphrase for archive-signer" not in opened.stdout
+    candidate = Path(next(line for line in opened.stdout.splitlines() if line.endswith(".docx")))
     from docx import Document
 
     document = Document(candidate)
     document.paragraphs[1].text = "Payment is due within 45 days."
     document.save(candidate)
-    session = Path(opened.stdout.splitlines()[1])
+    session = Path(
+        next(
+            line.strip()
+            for line in opened.stdout.splitlines()
+            if line.strip() and not line.strip().endswith(".docx")
+        )
+    )
     result = runner.invoke(
         app,
         [
@@ -315,8 +333,11 @@ def test_verified_verify_json_is_one_stdout_document(tmp_path, monkeypatch) -> N
             str(trust_path),
             "--json",
         ],
+        input="passphrase\n",
     )
 
     assert result.exit_code in {0, 1}, result.stderr
+    assert "Passphrase for archive-signer" in result.stderr
+    assert "Passphrase for archive-signer" not in result.stdout
     payload = json.loads(result.stdout)
     assert set(payload) == {"bundle", "verification"}

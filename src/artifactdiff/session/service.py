@@ -281,10 +281,46 @@ def open_verified_edit_session(
     resolved_baseline = path_policy.resolve_input(baseline)
     if resolved_baseline.suffix.casefold().lstrip(".") != checked_frozen.policy.baseline.format:
         raise SessionError("baseline format does not match frozen policy")
-    resolved_root = path_policy.resolve_output(root)
-    nonce = secrets.token_bytes(32)
     expected_baseline_digest = checked_frozen.policy.baseline.sha256
+    try:
+        observed_baseline_digest = sha256_file(resolved_baseline)
+    except OSError:
+        raise SessionError("unable to read baseline") from None
+    if observed_baseline_digest != expected_baseline_digest:
+        raise SessionError("baseline does not match frozen policy")
+
+    nonce = secrets.token_bytes(32)
     identifier = _session_id(frozen_digest, expected_baseline_digest, nonce)
+    authorization_digest = _authorization_digest(checked_authorization)
+    event_fields: dict[str, object] = {
+        "schema_version": "1.0",
+        "event_type": "session_opened",
+        "sequence": 1,
+        "session_id": identifier,
+        "frozen_policy_sha256": frozen_digest,
+        "baseline_sha256": observed_baseline_digest,
+        "policy_authorization_sha256": authorization_digest,
+        "previous_event_digest": authorization_digest,
+        "nonce_sha256": hashlib.sha256(nonce).hexdigest(),
+        "chronology": "artifactdiff_controlled_session",
+        "trusted_time": False,
+    }
+    event_digest = _digest(event_fields)
+    event_signature = session_signer.sign(
+        purpose=_SESSION_PURPOSE,
+        digest=event_digest,
+        required_role=TrustRole.ARCHIVE_SIGNER,
+    )
+    verify_signature(
+        event_signature,
+        purpose=_SESSION_PURPOSE,
+        digest=event_digest,
+        required_role=TrustRole.ARCHIVE_SIGNER,
+        trust_store=trust_store,
+    )
+    event = SessionOpenedEvent.model_validate({**event_fields, "signature": event_signature})
+
+    resolved_root = path_policy.resolve_output(root)
     final = path_policy.resolve_output(resolved_root / "sessions" / identifier)
     staging = path_policy.resolve_output(final.parent / f".{identifier}.{secrets.token_hex(8)}.tmp")
     if final.exists() or staging.exists():
@@ -312,40 +348,12 @@ def open_verified_edit_session(
         candidate = candidate_dir / resolved_baseline.name
         shutil.copyfile(resolved_baseline, baseline_snapshot)
         _after_stage_write("baseline")
-        observed_baseline_digest = sha256_file(baseline_snapshot)
-        if observed_baseline_digest != expected_baseline_digest:
+        snapshot_baseline_digest = sha256_file(baseline_snapshot)
+        if snapshot_baseline_digest != expected_baseline_digest:
             raise SessionError("baseline does not match frozen policy")
         shutil.copyfile(baseline_snapshot, candidate)
         _after_stage_write("candidate")
 
-        authorization_digest = _authorization_digest(checked_authorization)
-        event_fields: dict[str, object] = {
-            "schema_version": "1.0",
-            "event_type": "session_opened",
-            "sequence": 1,
-            "session_id": identifier,
-            "frozen_policy_sha256": frozen_digest,
-            "baseline_sha256": observed_baseline_digest,
-            "policy_authorization_sha256": authorization_digest,
-            "previous_event_digest": authorization_digest,
-            "nonce_sha256": hashlib.sha256(nonce).hexdigest(),
-            "chronology": "artifactdiff_controlled_session",
-            "trusted_time": False,
-        }
-        event_digest = _digest(event_fields)
-        event_signature = session_signer.sign(
-            purpose=_SESSION_PURPOSE,
-            digest=event_digest,
-            required_role=TrustRole.ARCHIVE_SIGNER,
-        )
-        verify_signature(
-            event_signature,
-            purpose=_SESSION_PURPOSE,
-            digest=event_digest,
-            required_role=TrustRole.ARCHIVE_SIGNER,
-            trust_store=trust_store,
-        )
-        event = SessionOpenedEvent.model_validate({**event_fields, "signature": event_signature})
         _write_canonical(events_dir / "000001-session-opened.json", event)
         _after_stage_write("event")
 
@@ -359,14 +367,14 @@ def open_verified_edit_session(
             baseline_snapshot_path=final_baseline,
             candidate_path=final_candidate,
             frozen_policy_sha256=frozen_digest,
-            baseline_sha256=observed_baseline_digest,
+            baseline_sha256=snapshot_baseline_digest,
             policy_authorization_sha256=authorization_digest,
             events=[event],
         )
         _write_canonical(staging / "session.json", session)
         _after_stage_write("session")
         baseline_snapshot.chmod(stat.S_IREAD)
-        if sha256_file(baseline_snapshot) != observed_baseline_digest:
+        if sha256_file(baseline_snapshot) != snapshot_baseline_digest:
             raise SessionError("baseline snapshot changed before session publication")
         staging.replace(final)
         return session

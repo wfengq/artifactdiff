@@ -231,6 +231,7 @@ def test_policy_create_yaml_is_equivalent_to_canonical_json(tmp_path: Path) -> N
     yaml_result = runner.invoke(
         app, ["policy", "create", str(baseline), "--output", str(yaml_policy), *arguments]
     )
+    original_yaml = yaml_policy.read_bytes()
     repeated = runner.invoke(
         app, ["policy", "create", str(baseline), "--output", str(yaml_policy), *arguments]
     )
@@ -241,3 +242,4 @@ def test_policy_create_yaml_is_equivalent_to_canonical_json(tmp_path: Path) -> N
         json_policy.read_text(encoding="utf-8")
     )
     assert repeated.exit_code == 2
+    assert yaml_policy.read_bytes() == original_yaml
