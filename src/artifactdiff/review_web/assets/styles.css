@@ -18,6 +18,9 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, [tabindex]:focus-visible { outline: 3px solid #d25b35; outline-offset: 3px; }
 fieldset { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: .5rem; border: 1px solid #b8b0a1; }
 fieldset label { display: flex; align-items: center; gap: .4rem; font-weight: 500; }
+.policy-overview { display: grid; grid-template-columns: minmax(8rem, 12rem) 1fr; gap: .5rem 1rem; }
+.policy-overview dt { font-weight: 800; }
+.policy-overview dd { margin: 0; overflow-wrap: anywhere; }
 nav { display: flex; gap: .75rem; flex-wrap: wrap; }
 ol { padding-left: 1.5rem; }
 li { margin-block: .5rem; }

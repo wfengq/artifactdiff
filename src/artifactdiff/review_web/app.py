@@ -42,6 +42,28 @@ _MUTATING_PATHS = {
     "/api/approvals",
     "/api/shutdown",
 }
+_MAX_JSON_BODY_BYTES = 64 * 1024
+
+
+class _BodyTooLarge(ValueError):
+    pass
+
+
+async def _bounded_json(request: Request) -> object:
+    declared = request.headers.get("content-length")
+    if declared is not None:
+        try:
+            declared_size = int(declared)
+        except ValueError:
+            raise ValueError("invalid content length") from None
+        if declared_size > _MAX_JSON_BODY_BYTES:
+            raise _BodyTooLarge
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _MAX_JSON_BODY_BYTES:
+            raise _BodyTooLarge
+    return json.loads(bytes(body))
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,9 +198,9 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
             if path == "/api/policy" and request.method == "GET":
                 payload = views.policy_overview()
             elif path == "/api/policy":
-                payload = views.draft_policy(await request.json())
+                payload = views.draft_policy(await _bounded_json(request))
             elif path == "/api/policy/seal":
-                payload = views.seal_policy(await request.json())
+                payload = views.seal_policy(await _bounded_json(request))
             elif path == "/api/bundle":
                 payload = views.bundle_overview()
             elif path == "/api/findings":
@@ -189,9 +211,11 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
             elif path.startswith("/api/findings/"):
                 payload = views.finding(request.path_params["id"])
             elif path == "/api/approvals":
-                payload = views.approve(await request.json())
+                payload = views.approve(await _bounded_json(request))
             else:
                 return JSONResponse({"error": "not found"}, status_code=404)
+        except _BodyTooLarge:
+            return JSONResponse({"error": "review request is too large"}, status_code=413)
         except (ArtifactDiffError, ValidationError, ValueError, json.JSONDecodeError) as error:
             status, message = public_view_error(error)
             return JSONResponse({"error": message}, status_code=status)

@@ -104,6 +104,15 @@ setTimeout(() => {
     assert result.returncode == 0, result.stderr
 
 
+def test_stale_finding_response_cannot_replace_detail_or_approval_target() -> None:
+    """Out-of-order detail fetches must not approve a finding different from the rendered one."""
+    asset = Path(review_app.__file__).with_name("assets") / "app.js"
+    source = asset.read_text(encoding="utf-8")
+    assert "selectionGeneration" in source
+    assert "renderedFindingId" in source
+    assert "findings[selected].id" not in source
+
+
 @pytest.mark.parametrize("path", ["/assets/app.js", "/assets/styles.css", "/not-a-route"])
 def test_assets_and_errors_receive_the_same_security_headers(client: AsgiClient, path: str) -> None:
     """A missed static or error response would leave an exploitable weak response."""

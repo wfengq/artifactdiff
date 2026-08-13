@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -84,6 +85,24 @@ def test_wizard_matches_the_application_facade_canonical_policy(tmp_path: Path) 
     assert response.json()["state"] == "policy-ready"
 
 
+def test_policy_overview_never_returns_clause_or_contract_text(tmp_path: Path) -> None:
+    """Listing every clause excerpt would reconstruct the source contract in the browser."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+
+    response = _client(baseline).get(
+        "/api/policy",
+        headers={"X-ArtifactDiff-Session": SESSION_TOKEN, "X-ArtifactDiff-CSRF": CSRF_TOKEN},
+    )
+
+    assert response.status_code == 200
+    encoded = response.text
+    assert "Party A: Example Ltd." not in encoded
+    assert "applicable law" not in encoded
+    assert all(
+        "excerpt" not in clause and "text" not in clause for clause in response.json()["clauses"]
+    )
+
+
 def test_policy_summary_discloses_every_contract_safe_relaxation(tmp_path: Path) -> None:
     """Relaxing protected data, metadata, visual, or evidence defaults must never be hidden."""
     baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
@@ -146,7 +165,17 @@ def test_policy_endpoint_rejects_untrusted_unknown_and_invalid_selector_input(
 def test_local_seal_returns_only_the_public_sealed_artifact(tmp_path: Path) -> None:
     """A seal response must not expose server state, baseline content, or key material."""
     baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
-    client = _client(baseline)
+    output = tmp_path / "sealed-policy.json"
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    app = create_review_app(
+        ReviewContext(application, "policy", baseline, None, output), SESSION_TOKEN, CSRF_TOKEN
+    )
+    app.state.bound_host = "127.0.0.1:8765"
+    client = AsgiClient(app, base_url=BASE_URL)
+    assert (
+        client.post("/api/session", headers={"X-ArtifactDiff-Session": SESSION_TOKEN}).status_code
+        == 200
+    )
     drafted = client.post("/api/policy", headers=_headers(), json=_payload())
 
     sealed = client.post(
@@ -163,6 +192,24 @@ def test_local_seal_returns_only_the_public_sealed_artifact(tmp_path: Path) -> N
         == drafted.json()["summary"]["canonical_sha256"]
     )
     assert "private_key" not in sealed.text and "passphrase" not in sealed.text
+    assert output.exists()
+    assert (
+        json.loads(output.read_text(encoding="utf-8"))["frozen"]["canonical_sha256"]
+        == drafted.json()["summary"]["canonical_sha256"]
+    )
+
+
+def test_policy_request_rejects_oversized_body_and_selector_collections(tmp_path: Path) -> None:
+    """Browser JSON must be bounded before parsing and before selector resolution."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    client = _client(baseline)
+    oversized = client.post("/api/policy", headers=_headers(), content=b"{" + b" " * 70000 + b"}")
+    payload = _payload()
+    payload["selector"] = {**payload["selector"], "ancestor_path": ["x"] * 33}
+    too_many = client.post("/api/policy", headers=_headers(), json=payload)
+
+    assert oversized.status_code == 413
+    assert too_many.status_code == 422
 
 
 def test_static_assets_are_offline_accessible_and_use_no_html_insertion(tmp_path: Path) -> None:
@@ -201,6 +248,7 @@ def test_interactive_policy_create_opens_wizard_unless_no_open_is_set(
 
     def serve(context: object, *, open_browser: bool) -> Server:
         captured.append((context, open_browser))
+        context.output_path.write_bytes(b"sealed")
         return Server()
 
     monkeypatch.setattr("typer.testing._NamedTextIOWrapper.isatty", lambda _self: True)
@@ -214,3 +262,81 @@ def test_interactive_policy_create_opens_wizard_unless_no_open_is_set(
     context = captured[0][0]
     assert context.mode == "policy" and context.target_path == baseline
     assert context.output_path == output
+
+
+def test_interactive_policy_create_fails_if_wizard_closes_without_sealing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """CLI success must mean the requested sealed artifact was durably produced."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "missing.json"
+
+    class Thread:
+        def join(self) -> None:
+            return None
+
+    class Server:
+        thread = Thread()
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr("typer.testing._NamedTextIOWrapper.isatty", lambda _self: True)
+    monkeypatch.setattr(
+        "artifactdiff.review_web.server.serve_review", lambda *_args, **_kwargs: Server()
+    )
+
+    result = CliRunner().invoke(cli_app, ["policy", "create", str(baseline), "-o", str(output)])
+
+    assert result.exit_code == 2
+    assert not output.exists()
+
+
+def test_interactive_policy_create_configures_verified_signing_provider(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The first-party verified wizard choice must have a server-side signing provider."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "sealed.json"
+    store = tmp_path / "trust.json"
+    store.write_text('{"schema_version":"1.0","identities":[]}', encoding="utf-8")
+    key = tmp_path / "key.pem"
+    captured = []
+
+    class Thread:
+        def join(self) -> None:
+            return None
+
+    class Server:
+        thread = Thread()
+
+        def shutdown(self) -> None:
+            return None
+
+    def serve(context, **_kwargs):
+        captured.append(context)
+        context.output_path.write_bytes(b"sealed")
+        return Server()
+
+    monkeypatch.setattr("typer.testing._NamedTextIOWrapper.isatty", lambda _self: True)
+    monkeypatch.setattr("artifactdiff.review_web.server.serve_review", serve)
+
+    result = CliRunner().invoke(
+        cli_app,
+        [
+            "policy",
+            "create",
+            str(baseline),
+            "-o",
+            str(output),
+            "--sign",
+            "authorizer",
+            "--key",
+            str(key),
+            "--trust-store",
+            str(store),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured[0].signing_provider is not None

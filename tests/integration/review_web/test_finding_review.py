@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
 import json
 import stat
 from pathlib import Path
@@ -10,12 +11,16 @@ from typer.testing import CliRunner
 
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.bundle import write_review_bundle
+from artifactdiff.bundle.digests import canonical_bytes
 from artifactdiff.cli import app as cli_app
+from artifactdiff.evidence import EvidenceIndex, EvidenceItem, EvidenceKind
+from artifactdiff.policy import EvidenceMode
 from artifactdiff.review_web.app import ReviewContext, create_review_app
 from artifactdiff.review_web.signing_provider import (
     FakeSigningProvider,
     InteractiveEd25519SigningProvider,
 )
+from artifactdiff.review_web.views import _crop_payloads
 from artifactdiff.trust import SignatureEnvelope, TrustRole
 from artifactdiff.verification import (
     Finding,
@@ -138,6 +143,8 @@ def test_review_desk_approves_one_finding_and_updates_effective_verdict(
     assert result.json()["event"]["finding_id"] == finding.id
     assert result.json()["effective_verdict"]["outcome"] == "pass"
     assert result.json()["state"] == "approval-complete"
+    assert result.json()["event_history"][-1]["finding_id"] == finding.id
+    assert result.json()["signature_status"]["event_chain_valid"] is True
     assert signer.approval_calls == [(bundle, finding.id)]
     assert "private_key" not in result.text and "passphrase" not in result.text
 
@@ -312,3 +319,60 @@ def test_interactive_signer_erases_its_scoped_passphrase_buffer(
     assert len(captured) == 1
     assert set(captured[0].buffer) == {0}
     assert "correct horse battery staple" not in authorization.model_dump_json()
+
+
+def test_crop_payloads_enforce_aggregate_budget_and_rebind_file_hash(tmp_path: Path) -> None:
+    """Individually small crops must not exceed the response budget or change after verification."""
+    finding = _finding(FindingOutcome.REVIEW, approvable=True, location="clause:crops")
+    root = tmp_path / "bundle" / "core" / "evidence"
+    root.mkdir(parents=True)
+    payloads = [b"\x89PNG" + b"a" * (3 * 1024 * 1024), b"\x89PNG" + b"b" * (3 * 1024 * 1024)]
+    items = []
+    for index, contents in enumerate(payloads):
+        name = f"crop-{index}.png"
+        (root / name).write_bytes(contents)
+        items.append(
+            EvidenceItem(
+                kind=EvidenceKind.CHANGED_REGION,
+                path=name,
+                sha256=hashlib.sha256(contents).hexdigest(),
+                size_bytes=len(contents),
+                finding_ids=[finding.id],
+            )
+        )
+    (root / "index.json").write_bytes(
+        canonical_bytes(EvidenceIndex(mode=EvidenceMode.MINIMAL, items=items))
+    )
+
+    crops = _crop_payloads(tmp_path / "bundle", finding)
+    (root / "crop-0.png").write_bytes(b"\x89PNGtampered")
+    tampered = _crop_payloads(tmp_path / "bundle", finding)
+
+    assert len(crops) == 1
+    assert tampered == []
+
+
+def test_crop_payloads_refuse_symlinked_evidence(tmp_path: Path) -> None:
+    """A verified path replaced with a symlink must not disclose another local file."""
+    finding = _finding(FindingOutcome.REVIEW, approvable=True, location="clause:symlink")
+    root = tmp_path / "bundle" / "core" / "evidence"
+    root.mkdir(parents=True)
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"\x89PNGSECRET")
+    link = root / "crop.png"
+    try:
+        link.symlink_to(secret)
+    except OSError:
+        return
+    item = EvidenceItem(
+        kind=EvidenceKind.CHANGED_REGION,
+        path="crop.png",
+        sha256=hashlib.sha256(secret.read_bytes()).hexdigest(),
+        size_bytes=secret.stat().st_size,
+        finding_ids=[finding.id],
+    )
+    (root / "index.json").write_bytes(
+        canonical_bytes(EvidenceIndex(mode=EvidenceMode.MINIMAL, items=[item]))
+    )
+
+    assert _crop_payloads(tmp_path / "bundle", finding) == []

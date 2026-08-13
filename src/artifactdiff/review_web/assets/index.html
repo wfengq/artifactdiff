@@ -16,6 +16,14 @@
       <p id="status" role="status" aria-live="polite">Connecting to the local review desk.</p>
       <section id="policy-panel" hidden aria-labelledby="policy-heading">
         <h2 id="policy-heading">Pre-edit policy</h2>
+        <dl class="policy-overview">
+          <dt>Intent</dt><dd id="policy-intent">Exact replacement policy</dd>
+          <dt>Baseline</dt><dd id="policy-baseline"></dd>
+          <dt>Selected location</dt><dd id="policy-location">Not selected</dd>
+          <dt>Contract-safe defaults</dt><dd id="policy-defaults"></dd>
+          <dt>Assurance</dt><dd id="policy-assurance">Local</dd>
+          <dt>Canonical digest</dt><dd id="policy-digest">Available after review</dd>
+        </dl>
         <form id="policy-form">
           <label>Rule ID <input name="rule_id" required pattern="[a-z][a-z0-9-]{0,63}"></label>
           <label>Clause <input name="clause_label" required></label>
@@ -49,7 +57,10 @@
           <ul id="relaxations"></ul>
         </section>
         <pre id="policy-summary"></pre>
-        <button id="freeze-policy" type="button" disabled>Freeze local policy</button>
+        <label>Seal assurance
+          <select id="seal-assurance"><option value="local">Local freeze</option><option value="verified">Verified Ed25519 signature</option></select>
+        </label>
+        <button id="freeze-policy" type="button" disabled>Seal public policy artifact</button>
       </section>
       <section id="bundle-panel" hidden aria-labelledby="bundle-heading">
         <h2 id="bundle-heading">Findings</h2>

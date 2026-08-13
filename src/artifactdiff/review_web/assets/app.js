@@ -4,6 +4,8 @@
   let csrfToken = null;
   let findings = [];
   let selected = -1;
+  let selectionGeneration = 0;
+  let renderedFindingId = null;
   const fail = () => { status.textContent = "Unable to connect to the local review desk."; };
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
   history.replaceState(null, "", location.pathname);
@@ -45,9 +47,16 @@
       overview = await request("/api/policy", {headers: headers()});
       document.getElementById("policy-panel").hidden = false;
       document.getElementById("assurance").textContent = `Assurance: ${overview.assurance}`;
+      renderPolicyOverview(overview);
     }
     document.body.dataset.state = overview.state;
     status.textContent = "Connected to the local review desk.";
+  }
+
+  function renderPolicyOverview(overview) {
+    document.getElementById("policy-baseline").textContent = `${overview.baseline.format} · SHA-256 ${overview.baseline.sha256}`;
+    document.getElementById("policy-defaults").textContent = `Protect: ${overview.contract_safe.protect.join(", ")}; metadata: ${overview.contract_safe.metadata.non_business_change}; visual unavailable: ${overview.contract_safe.visual.on_unavailable}; evidence: ${overview.contract_safe.evidence.mode}`;
+    document.getElementById("policy-assurance").textContent = overview.assurance;
   }
 
   function renderBundle(bundle) {
@@ -69,7 +78,11 @@
   async function selectFinding(index) {
     if (index < 0 || index >= findings.length) return;
     selected = index;
-    const finding = await request(`/api/findings/${encodeURIComponent(findings[index].id)}`, {headers: headers()});
+    const generation = ++selectionGeneration;
+    const requestedFindingId = findings[index].id;
+    const finding = await request(`/api/findings/${encodeURIComponent(requestedFindingId)}`, {headers: headers()});
+    if (generation !== selectionGeneration || finding.id !== requestedFindingId) return;
+    renderedFindingId = finding.id;
     document.getElementById("finding-title").textContent = `${finding.outcome.toUpperCase()} finding`;
     document.getElementById("finding-rule").textContent = `Rule: ${finding.rule_id}`;
     document.getElementById("finding-selector").textContent = `Selector: ${finding.selector_status || "not applicable"}`;
@@ -97,20 +110,26 @@
     const result = await request("/api/policy", {method: "POST", headers: headers(true), body: JSON.stringify(payload)});
     document.body.dataset.state = result.state;
     document.getElementById("policy-summary").textContent = JSON.stringify(result.summary, null, 2);
+    document.getElementById("policy-intent").textContent = `${result.summary.intent.rule_id}: ${result.summary.operation.before} → ${result.summary.operation.after} (${result.summary.operation.occurrences})`;
+    document.getElementById("policy-location").textContent = `${result.summary.selected_location.clause_label} · ${result.summary.selected_location.heading} · ${result.summary.selected_location.clause_id}`;
+    document.getElementById("policy-digest").textContent = result.summary.canonical_sha256;
     const list = document.getElementById("relaxations"); list.replaceChildren();
     result.summary.relaxations.forEach((relaxation) => { const item = document.createElement("li"); item.textContent = `${relaxation.field}: ${JSON.stringify(relaxation.selected)}`; list.append(item); });
     document.getElementById("freeze-policy").disabled = false;
   });
   listen("freeze-policy", "click", async () => {
-    await request("/api/policy/seal", {method: "POST", headers: headers(true), body: JSON.stringify({assurance: "local"})});
-    status.textContent = "Policy frozen. The public sealed artifact is ready.";
+    const assurance = document.getElementById("seal-assurance").value;
+    const result = await request("/api/policy/seal", {method: "POST", headers: headers(true), body: JSON.stringify({assurance})});
+    document.getElementById("policy-assurance").textContent = result.assurance;
+    status.textContent = `Policy sealed at ${result.output}.`;
   });
   listen("approval-form", "submit", async (event) => {
     event.preventDefault(); document.body.dataset.state = "approval-pending";
     const reason = new FormData(event.currentTarget).get("reason");
-    const result = await request("/api/approvals", {method: "POST", headers: headers(true), body: JSON.stringify({finding_id: findings[selected].id, reason})});
+    if (renderedFindingId === null) return;
+    const result = await request("/api/approvals", {method: "POST", headers: headers(true), body: JSON.stringify({finding_id: renderedFindingId, reason})});
     document.body.dataset.state = result.state;
-    document.getElementById("effective-verdict").textContent = `Effective verdict: ${result.effective_verdict.outcome}`;
+    renderBundle(result);
     event.currentTarget.hidden = true;
   });
   listen("shutdown", "click", () => void request("/api/shutdown", {method: "POST", headers: headers(true), body: "{}"}));

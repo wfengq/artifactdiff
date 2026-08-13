@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from artifactdiff.application import ArtifactDiffApplication
+from artifactdiff.application import ArtifactDiffApplication, PolicyValidationResult
 from artifactdiff.bundle import BundleVerification
 from artifactdiff.contract import ClauseSelector
 from artifactdiff.errors import ApprovalError, ArtifactDiffError, PolicyValidationError
@@ -26,7 +28,7 @@ from artifactdiff.policy import (
 )
 from artifactdiff.policy.models import PolicyPluginRequirement
 from artifactdiff.review_web.signing_provider import ReviewSigningProvider
-from artifactdiff.session import SealedPolicyArtifact
+from artifactdiff.session import SealedPolicyArtifact, write_sealed_policy
 from artifactdiff.verification import Finding, FindingOutcome
 
 
@@ -34,16 +36,23 @@ class _ViewModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class SelectorRequest(_ViewModel):
+    clause_label: str = Field(max_length=256)
+    heading: str = Field(max_length=512)
+    ancestor_path: list[str] = Field(default_factory=list, max_length=16)
+    anchor: str = Field(min_length=1, max_length=4096)
+
+
 class PolicyDraftRequest(_ViewModel):
     rule_id: str = Field(pattern=r"^[a-z][a-z0-9-]{0,63}$")
-    selector: ClauseSelector
+    selector: SelectorRequest
     before: str = Field(min_length=1, max_length=10_000)
     after: str = Field(min_length=1, max_length=10_000)
-    protect: list[str] | None = None
+    protect: list[str] | None = Field(default=None, max_length=32)
     metadata: MetadataPolicy | None = None
     visual: VisualPolicy | None = None
     evidence: EvidencePolicy | None = None
-    required_plugins: dict[str, PolicyPluginRequirement] | None = None
+    required_plugins: dict[str, PolicyPluginRequirement] | None = Field(default=None, max_length=32)
 
 
 class PolicySealRequest(_ViewModel):
@@ -86,7 +95,6 @@ class ReviewViews:
                     "clause_label": (value.get("label") or {}).get("printed"),
                     "heading": value.get("heading"),
                     "ancestor_path": value.get("ancestor_path", []),
-                    "excerpt": str(value.get("text", ""))[:512],
                 }
             )
         return {
@@ -112,7 +120,7 @@ class ReviewViews:
         request = PolicyDraftRequest.model_validate(payload)
         drafted = self.application.draft_policy(
             self.target_path,
-            request.selector,
+            ClauseSelector.model_validate(request.selector.model_dump(mode="python")),
             before=request.before,
             after=request.after,
             rule_id=request.rule_id,
@@ -129,12 +137,11 @@ class ReviewViews:
         policy = ContractPolicy.model_validate(policy_payload)
         self._validate_through_facade(policy)
         self._draft = policy
-        if self.output_path is not None:
-            self.application.write_policy(policy, self.output_path)
+        checked = self._validate_through_facade(policy)
         return {
             "state": "policy-ready",
             "policy": policy.model_dump(mode="json"),
-            "summary": _policy_summary(policy),
+            "summary": _policy_summary(policy, resolved_clause_id=checked.resolved_clause_id),
         }
 
     def seal_policy(self, payload: object) -> dict[str, object]:
@@ -154,10 +161,14 @@ class ReviewViews:
                 raise PolicyValidationError("verified assurance requires a signing provider")
             authorization = self.signing_provider.sign_policy(sealed.frozen)
         artifact = SealedPolicyArtifact(frozen=sealed.frozen, authorization=authorization)
+        if self.output_path is None:
+            raise PolicyValidationError("sealed policy output is not configured")
+        write_sealed_policy(artifact, self.output_path)
         return {
             "state": "policy-ready",
             "assurance": request.assurance,
             "artifact": artifact.model_dump(mode="json"),
+            "output": str(self.output_path.resolve()),
         }
 
     def bundle_overview(self) -> dict[str, object]:
@@ -201,6 +212,7 @@ class ReviewViews:
             finding.outcome is FindingOutcome.REVIEW and finding.approvable
         )
         payload["page_crops"] = _crop_payloads(self.target_path, finding)
+        self._verified_bundle()
         return payload
 
     def approve(self, payload: object) -> dict[str, object]:
@@ -215,18 +227,13 @@ class ReviewViews:
         event = self.signing_provider.sign_approval(
             self.target_path, request.finding_id, request.reason.strip()
         )
-        return {
-            "state": "approval-complete",
-            "event": event.model_dump(mode="json"),
-            "effective_verdict": self.application.effective_verdict(self.target_path).model_dump(
-                mode="json"
-            ),
-        }
+        overview = self.bundle_overview()
+        return {**overview, "state": "approval-complete", "event": event.model_dump(mode="json")}
 
-    def _validate_through_facade(self, policy: ContractPolicy) -> None:
+    def _validate_through_facade(self, policy: ContractPolicy) -> PolicyValidationResult:
         with TemporaryDirectory(prefix="artifactdiff-review-policy-") as temporary:
             path = self.application.write_policy(policy, Path(temporary) / "policy.json")
-            self.application.validate_policy(self.target_path, path)
+            return self.application.validate_policy(self.target_path, path)
 
     def _require_mode(self, expected: str) -> None:
         if self.mode != expected:
@@ -239,7 +246,7 @@ class ReviewViews:
         return verification
 
 
-def _policy_summary(policy: ContractPolicy) -> dict[str, object]:
+def _policy_summary(policy: ContractPolicy, *, resolved_clause_id: str) -> dict[str, object]:
     default = ContractPolicy(baseline=policy.baseline)
     relaxations: list[dict[str, object]] = []
     comparisons = (
@@ -286,6 +293,12 @@ def _policy_summary(policy: ContractPolicy) -> dict[str, object]:
         "intent": {"rule_id": rule.id, "operation": "exact_replace"},
         "baseline": policy.baseline.model_dump(mode="json"),
         "selector": rule.selector.model_dump(mode="json"),
+        "selected_location": {
+            "clause_id": resolved_clause_id,
+            "clause_label": rule.selector.clause_label,
+            "heading": rule.selector.heading,
+            "ancestor_path": list(rule.selector.ancestor_path),
+        },
         "operation": rule.operation.model_dump(mode="json"),
         "protect": sorted(item.value for item in policy.protect),
         "metadata": policy.metadata.model_dump(mode="json"),
@@ -312,6 +325,8 @@ def _finding_payload(finding: Finding) -> dict[str, Any]:
 def _crop_payloads(bundle: Path, finding: Finding) -> list[dict[str, str]]:
     index = bundle / "core" / "evidence" / "index.json"
     try:
+        if index.is_symlink() or index.stat().st_size > 1024 * 1024:
+            return []
         evidence = EvidenceIndex.model_validate_json(index.read_bytes())
     except (OSError, ValueError):
         return []
@@ -321,13 +336,48 @@ def _crop_payloads(bundle: Path, finding: Finding) -> list[dict[str, str]]:
         if finding.id in item.finding_ids and item.kind is EvidenceKind.CHANGED_REGION
     )
     crops: list[dict[str, str]] = []
+    total_bytes = 0
     for item in linked:
-        if len(crops) == 20 or item.size_bytes > 5 * 1024 * 1024:
+        if (
+            len(crops) == 20
+            or item.size_bytes > 5 * 1024 * 1024
+            or total_bytes + item.size_bytes > 5 * 1024 * 1024
+        ):
             break
         path = bundle / "core" / "evidence" / Path(item.path)
+        descriptor: int | None = None
         try:
-            contents = path.read_bytes()
+            if path.is_symlink() or path.resolve(strict=True) != path:
+                return []
+            before = path.stat()
+            if not path.is_file() or before.st_size != item.size_bytes:
+                return []
+            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            chunks: list[bytes] = []
+            remaining = item.size_bytes + 1
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 64 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            contents = b"".join(chunks)
+            after = path.stat()
         except OSError:
+            return []
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        if (
+            len(contents) != item.size_bytes
+            or opened.st_size != item.size_bytes
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or hashlib.sha256(contents).hexdigest() != item.sha256
+        ):
             return []
         suffix = path.suffix.casefold()
         media_type = (
@@ -344,6 +394,7 @@ def _crop_payloads(bundle: Path, finding: Finding) -> list[dict[str, str]]:
                     "data_url": f"data:{media_type};base64,{base64.b64encode(contents).decode('ascii')}",
                 }
             )
+            total_bytes += len(contents)
     return crops
 
 
