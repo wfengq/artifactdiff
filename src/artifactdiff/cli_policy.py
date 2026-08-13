@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import cast
 
 import typer
 
@@ -20,7 +21,7 @@ def _required(value: str | None, label: str) -> str:
         return value
     if not sys.stdin.isatty():
         raise PolicyValidationError(f"{label} is required for non-interactive policy creation")
-    return typer.prompt(label)
+    return cast(str, typer.prompt(label))
 
 
 @policy_app.command("create")

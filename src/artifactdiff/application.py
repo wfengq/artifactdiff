@@ -35,12 +35,14 @@ from artifactdiff.policy import (
 )
 from artifactdiff.policy.models import EvidenceMode
 from artifactdiff.review import (
+    ApprovalEvent,
     EffectiveVerdict,
     approve_finding,
     list_findings,
     load_effective_verdict,
 )
 from artifactdiff.session import (
+    EditSession,
     SealedPolicyArtifact,
     claim_verified_candidate,
     load_edit_session,
@@ -146,7 +148,7 @@ class ArtifactDiffApplication:
         output: Path,
         *,
         session_signer: SigningProvider,
-    ) -> object:
+    ) -> EditSession:
         if self.path_policy is None:
             from artifactdiff.errors import SessionError
 
@@ -232,7 +234,7 @@ class ArtifactDiffApplication:
 
     def approve(
         self, bundle: Path, finding_id: str, reason: str, *, signer: SigningProvider
-    ) -> object:
+    ) -> ApprovalEvent:
         return approve_finding(
             self._directory_input(bundle),
             finding_id,

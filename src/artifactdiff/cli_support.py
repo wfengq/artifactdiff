@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import cast
 
 import typer
 
@@ -30,7 +31,10 @@ class _PromptSecret:
     def get_secret(self, identity: str) -> bytes:
         if not sys.stdin.isatty():
             raise SignatureError("private-key passphrase requires an interactive terminal")
-        return typer.prompt(f"Passphrase for {identity}", hide_input=True, err=True).encode("utf-8")
+        passphrase = cast(
+            str, typer.prompt(f"Passphrase for {identity}", hide_input=True, err=True)
+        )
+        return passphrase.encode("utf-8")
 
 
 def interactive_signer(
