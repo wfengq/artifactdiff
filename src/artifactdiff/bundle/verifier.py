@@ -127,6 +127,8 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
     signature_states: list[bool] = []
     trust_states: list[bool] = []
     event_chain_valid = False
+    manifest_signer_identity: str | None = None
+    manifest_signer_fingerprint: str | None = None
     try:
         if path.is_symlink():
             raise BundleError("bundle_root_invalid")
@@ -261,6 +263,8 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
             authorization = authorization_value
             event = event_value
             manifest_signature = manifest_signature_value
+            manifest_signer_identity = manifest_signature.identity
+            manifest_signer_fingerprint = manifest_signature.public_key_fingerprint
             authorization_digest = canonical_digest(authorization)
             policy_valid, policy_trusted = _signature_status(
                 authorization.signature,
@@ -367,5 +371,7 @@ def verify_review_bundle(path: Path, *, trust_store: TrustStore) -> BundleVerifi
         signature_valid_at_creation=(all(signature_states) if signature_states else None),
         currently_trusted=(all(trust_states) if trust_states else None),
         event_chain_valid=event_chain_valid,
+        manifest_signer_identity=manifest_signer_identity,
+        manifest_signer_fingerprint=manifest_signer_fingerprint,
         errors=list(dict.fromkeys(errors)),
     )

@@ -86,4 +86,6 @@ class BundleVerification(BundleModel):
     signature_valid_at_creation: StrictBool | None = None
     currently_trusted: StrictBool | None = None
     event_chain_valid: StrictBool
+    manifest_signer_identity: StrictStr | None = None
+    manifest_signer_fingerprint: StrictStr | None = Field(default=None, pattern=_SHA256_PATTERN)
     errors: list[StrictStr] = Field(default_factory=list)

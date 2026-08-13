@@ -6,16 +6,17 @@ from pathlib import Path
 
 import pytest
 from bs4 import BeautifulSoup
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from artifactdiff.bundle import write_review_bundle
-from artifactdiff.bundle.digests import canonical_bytes
+from artifactdiff.bundle.digests import canonical_bytes, canonical_digest
 from artifactdiff.bundle.models import BundleManifest
 from artifactdiff.errors import BundleError
 from artifactdiff.evidence import EvidenceIndex, EvidenceItem, EvidenceKind
 from artifactdiff.policy import EvidenceMode, EvidencePolicy, policy_digest
 from artifactdiff.reporting.contract_html import write_contract_html
 from artifactdiff.review import approve_finding
-from artifactdiff.trust import TrustStore
+from artifactdiff.trust import TrustRole, TrustStore
 from artifactdiff.verification import (
     Finding,
     FindingEvidence,
@@ -242,6 +243,7 @@ def test_sealed_report_never_embeds_source_contract_bytes(
         bundle, tmp_path / "sealed.html", trust_store=bundle_fixture.trust_store
     ).read_bytes()
     assert secret not in html
+    assert b"sealed evidence mode" in html.lower()
 
 
 def test_contract_report_rejects_tampered_bundle_before_writing(
@@ -394,13 +396,14 @@ def test_contract_report_never_overwrites_a_concurrently_created_output(
 ) -> None:
     bundle = _bundle(bundle_fixture)
     output = tmp_path / "review.html"
-    original = os.link
+    original = os.open
 
-    def race(source: Path, target: Path) -> None:
-        output.write_bytes(b"concurrent creator")
-        original(source, target)
+    def race(path: object, flags: int, mode: int = 0o777) -> int:
+        if Path(path) == output:
+            output.write_bytes(b"concurrent creator")
+        return original(path, flags, mode)
 
-    monkeypatch.setattr(os, "link", race)
+    monkeypatch.setattr(os, "open", race)
 
     with pytest.raises(BundleError, match="output"):
         write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
@@ -459,3 +462,112 @@ def test_event_enumeration_stops_as_soon_as_the_bound_is_exceeded(
     with pytest.raises(BundleError, match="bounded model"):
         contract_html._events(bundle, manifest)
     assert consumed == 1_002
+
+
+@pytest.mark.parametrize("operation", ["omit", "alternate_signer"])
+def test_contract_report_rejects_manifest_signature_aba_snapshot(
+    bundle_fixture: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    from artifactdiff.reporting import contract_html
+
+    bundle = _bundle(bundle_fixture)
+    signature_path = bundle / "core" / "manifest.sig"
+    original_read = contract_html._read
+    trust_store = bundle_fixture.trust_store
+    if operation == "alternate_signer":
+        from tests.integration.bundle.conftest import MemorySigner, _identity
+
+        manifest = BundleManifest.model_validate_json(
+            (bundle / "core" / "manifest.json").read_bytes()
+        )
+        private_key = Ed25519PrivateKey.generate()
+        identity = _identity(
+            private_key, identity="alternate-valid-archive", role=TrustRole.ARCHIVE_SIGNER
+        )
+        alternate = MemorySigner(private_key, identity).sign(
+            purpose="bundle_manifest",
+            digest=canonical_digest(manifest),
+            required_role=TrustRole.ARCHIVE_SIGNER,
+        )
+        trust_store = TrustStore(identities=[*trust_store.identities, identity])
+        injected = canonical_bytes(alternate)
+    else:
+        injected = None
+
+    def unstable_read(root: Path, path: Path, **kwargs: object) -> bytes:
+        if path == signature_path and operation == "omit":
+            raise BundleError("signature omitted during captured read")
+        if path == signature_path and injected is not None:
+            return injected
+        return original_read(root, path, **kwargs)
+
+    monkeypatch.setattr(contract_html, "_read", unstable_read)
+    with pytest.raises(BundleError):
+        write_contract_html(bundle, tmp_path / "review.html", trust_store=trust_store)
+
+
+@pytest.mark.parametrize("replacement", ["same_size", "different_size"])
+def test_contract_report_never_returns_or_deletes_concurrent_replacement(
+    bundle_fixture: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement: str,
+) -> None:
+    from artifactdiff.reporting import contract_html
+
+    bundle = _bundle(bundle_fixture)
+    output = tmp_path / "review.html"
+    original_fsync = os.fsync
+    original_stat = Path.stat
+    replacement_visible = False
+
+    def replace_after_write(descriptor: int) -> None:
+        nonlocal replacement_visible
+        original_fsync(descriptor)
+        replacement_visible = True
+
+    def replacement_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
+        result = original_stat(path, *args, **kwargs)
+        if path == output and replacement_visible:
+            values = list(result)
+            values[1] = result.st_ino + 1
+            if replacement == "different_size":
+                values[6] = result.st_size + 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(contract_html.os, "fsync", replace_after_write)
+    monkeypatch.setattr(Path, "stat", replacement_stat)
+    with pytest.raises(BundleError, match="output"):
+        write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
+    assert output.exists()
+    assert output.read_bytes().startswith(b"<!doctype html>")
+
+
+def test_contract_report_rejects_parent_swap_without_publishing_outside_anchor(
+    bundle_fixture: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle(bundle_fixture)
+    parent = tmp_path / "reports"
+    parent.mkdir()
+    alternate = tmp_path / "reports-swapped"
+    alternate.mkdir()
+    output = parent / "review.html"
+    original_resolve = Path.resolve
+    parent_resolves = 0
+
+    def swap_parent(path: Path, *args: object, **kwargs: object) -> Path:
+        nonlocal parent_resolves
+        if path == parent:
+            parent_resolves += 1
+            if parent_resolves > 1:
+                return alternate
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", swap_parent)
+    with pytest.raises(BundleError, match="output|parent"):
+        write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
+    assert not (parent / "review.html").exists()

@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import secrets
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +14,7 @@ from jinja2 import Environment, PackageLoader, StrictUndefined, select_autoescap
 from pydantic import BaseModel, ValidationError
 
 from artifactdiff.bundle.digests import canonical_bytes, canonical_digest
-from artifactdiff.bundle.models import BundleManifest
+from artifactdiff.bundle.models import BundleAssurance, BundleManifest
 from artifactdiff.bundle.verifier import verify_review_bundle
 from artifactdiff.errors import BundleError, PolicyValidationError
 from artifactdiff.evidence import EvidenceIndex, EvidenceKind
@@ -370,8 +369,8 @@ def _capture(bundle: Path, trust_store: TrustStore) -> tuple[_CapturedBundle, An
         )
         if not inspection.signature_valid:
             raise BundleError("contract report session signature snapshot is invalid")
-    policy_signature = root / "core" / "policy.sig"
-    if policy_signature.exists():
+    verified_assurance = manifest.assurance is not BundleAssurance.LOCAL
+    if verified_assurance:
         authorization = captured_model("core/policy.sig", PolicyAuthorization)
         assert isinstance(authorization, PolicyAuthorization)
         signatures.append(_signature("Policy authorization", authorization.signature))
@@ -384,9 +383,8 @@ def _capture(bundle: Path, trust_store: TrustStore) -> tuple[_CapturedBundle, An
         )
         if not policy_inspection.signature_valid:
             raise BundleError("contract report policy signature snapshot is invalid")
-    manifest_signature = root / "core" / "manifest.sig"
-    if manifest_signature.exists():
-        envelope = _model(root, "core/manifest.sig", SignatureEnvelope)
+    if verified_assurance:
+        envelope = _model(root, "core/manifest.sig", SignatureEnvelope, maximum=64 * 1024)
         assert isinstance(envelope, SignatureEnvelope)
         manifest_inspection = inspect_signature(
             envelope,
@@ -397,6 +395,11 @@ def _capture(bundle: Path, trust_store: TrustStore) -> tuple[_CapturedBundle, An
         )
         if not manifest_inspection.signature_valid:
             raise BundleError("contract report manifest signature snapshot is invalid")
+        if (
+            first.manifest_signer_identity != envelope.identity
+            or first.manifest_signer_fingerprint != envelope.public_key_fingerprint
+        ):
+            raise BundleError("contract report manifest signature attribution changed")
         signatures.append(_signature("Bundle manifest", envelope))
     signatures.extend(event_signatures)
     second = verify_review_bundle(root, trust_store=trust_store)
@@ -515,6 +518,10 @@ def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) 
         visual_unavailable=not captured.images,
         manifest_sha256=canonical_digest(captured.manifest),
     )
+    descriptor: int | None = None
+    owned_identity: tuple[int, int] | None = None
+    published = False
+    final: Path | None = None
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
         parent = output.parent.resolve(strict=True)
@@ -524,30 +531,59 @@ def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) 
         final = parent / output.name
         if final.is_symlink() or final.exists():
             raise BundleError("contract report output must be new")
-        temporary = parent / f".{output.name}.{secrets.token_hex(8)}.tmp"
-        with temporary.open("xb") as stream:
-            stream.write(rendered.encode("utf-8"))
-            stream.flush()
-            os.fsync(stream.fileno())
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        descriptor = os.open(final, flags, 0o600)
+        opened = os.fstat(descriptor)
+        owned_identity = (opened.st_dev, opened.st_ino)
+        contents = rendered.encode("utf-8")
+        offset = 0
+        while offset < len(contents):
+            written = os.write(descriptor, contents[offset:])
+            if written <= 0:
+                raise BundleError("contract report output publication failed")
+            offset += written
+        os.fsync(descriptor)
         current_parent = parent.stat()
         if (current_parent.st_dev, current_parent.st_ino) != (
             parent_status.st_dev,
             parent_status.st_ino,
         ) or output.parent.resolve(strict=True) != parent:
             raise BundleError("contract report output parent changed")
-        try:
-            os.link(temporary, final)
-        except FileExistsError:
-            raise BundleError("contract report output must be new") from None
-        if final.is_symlink() or final.stat().st_size != temporary.stat().st_size:
-            final.unlink(missing_ok=True)
+        descriptor_status = os.fstat(descriptor)
+        path_status = final.stat(follow_symlinks=False)
+        if (
+            final.is_symlink()
+            or (path_status.st_dev, path_status.st_ino) != owned_identity
+            or (descriptor_status.st_dev, descriptor_status.st_ino) != owned_identity
+            or descriptor_status.st_size != len(contents)
+            or path_status.st_size != len(contents)
+        ):
             raise BundleError("contract report output publication failed")
-        temporary.unlink()
+        if hashlib.sha256(final.read_bytes()).digest() != hashlib.sha256(contents).digest():
+            raise BundleError("contract report output publication failed")
+        final_status = final.stat(follow_symlinks=False)
+        if (final_status.st_dev, final_status.st_ino) != owned_identity:
+            raise BundleError("contract report output publication failed")
+        published = True
         return final
+    except FileExistsError:
+        raise BundleError("contract report output must be new") from None
     except BundleError:
         raise
     except OSError:
-        raise BundleError("unable to write contract report") from None
+        raise BundleError("contract report output publication failed") from None
     finally:
-        if "temporary" in locals():
-            temporary.unlink(missing_ok=True)
+        if descriptor is not None:
+            os.close(descriptor)
+        if not published and final is not None and owned_identity is not None:
+            try:
+                status = final.stat(follow_symlinks=False)
+                if (
+                    not final.is_symlink()
+                    and (status.st_dev, status.st_ino) == owned_identity
+                    and hashlib.sha256(final.read_bytes()).digest()
+                    == hashlib.sha256(contents).digest()
+                ):
+                    final.unlink()
+            except OSError:
+                pass

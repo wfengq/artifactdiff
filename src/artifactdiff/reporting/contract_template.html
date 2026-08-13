@@ -52,7 +52,7 @@
     </section>
     <section aria-labelledby="evidence-heading">
       <h2 id="evidence-heading">Authorized evidence</h2>
-      {% if evidence_mode == "full" %}<p class="warning" role="alert">Sensitive-data warning: full evidence mode may contain complete contract pages and substantially more contract content.</p>{% endif %}
+      {% if evidence_mode == "full" %}<p class="warning" role="alert">Sensitive-data warning: full evidence mode may contain complete contract pages and substantially more contract content.</p>{% elif evidence_mode == "sealed" %}<p class="warning" role="alert">Sensitive-data warning: sealed evidence mode may contain source contracts and complete evidence. This report intentionally does not embed source-contract bytes.</p>{% endif %}
       {% if visual_unavailable %}<p class="warning" role="alert">Visual evidence is unavailable. Review the semantic findings and the policy's visual-unavailable rule.</p>{% endif %}
       {% for excerpt in excerpts %}<article><h3>{{ excerpt.path }}</h3><pre>{{ excerpt.text }}</pre></article>{% endfor %}
       {% for image in images %}<figure><figcaption>{{ image.kind }} · {{ image.path }}</figcaption><img data-evidence-kind="{{ image.kind }}" src="{{ image.data_url }}" alt="Authorized {{ image.kind }} evidence"></figure>{% endfor %}
