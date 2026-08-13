@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+import artifactdiff.review_web.server as review_server_module
 from artifactdiff.review_web.app import ReviewContext, create_review_app
 from artifactdiff.review_web.server import ReviewServer, serve_review
 from tests.review_web_client import AsgiClient
@@ -148,6 +149,35 @@ def test_mutating_routes_require_exact_origin_and_json_content_type(client: Asgi
         415,
         501,
     )
+
+
+def test_only_successful_shell_session_and_authenticated_api_actions_record_activity(
+    tmp_path: Path,
+) -> None:
+    """Recording rejected requests lets unauthenticated traffic prolong the server lifetime."""
+    app = create_review_app(
+        ReviewContext(
+            application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
+        ),
+        SESSION_TOKEN,
+        CSRF_TOKEN,
+    )
+    app.state.bound_host = "127.0.0.1:8765"
+    activity: list[str] = []
+    app.state.activity_callback = lambda: activity.append("accepted")
+    client = AsgiClient(app, base_url="http://127.0.0.1:8765")
+
+    assert client.get("/").status_code == 200
+    assert client.get("/assets/app.js").status_code == 200
+    assert client.get("/assets/nope.js").status_code == 404
+    assert client.get("/api/policy").status_code == 403
+    assert (
+        client.post("/api/session", headers={"X-ArtifactDiff-Session": SESSION_TOKEN}).status_code
+        == 200
+    )
+    assert client.get("/api/policy", headers=session_headers()).status_code == 501
+
+    assert activity == ["accepted", "accepted", "accepted", "accepted"]
 
 
 def test_shutdown_is_one_use_and_server_shutdown_is_idempotent(client: AsgiClient) -> None:
@@ -325,6 +355,135 @@ def test_live_valid_wrong_host_rejection_has_security_headers_but_parser_errors_
         assert "content-security-policy:" not in responses[label].lower()
 
 
+def test_shutdown_releases_lifecycle_state_before_waiting_for_the_server_thread() -> None:
+    """Joining while holding lifecycle state deadlocks a request completing accepted activity."""
+    listener = _listener()
+
+    class Server:
+        should_exit = False
+
+    class Thread:
+        def __init__(self) -> None:
+            self.server: ReviewServer | None = None
+            self.activity_finished = threading.Event()
+
+        def join(self, timeout: float) -> None:
+            assert self.server is not None
+            activity = threading.Thread(
+                target=lambda: (self.server.reset_idle_timer(), self.activity_finished.set())
+            )
+            activity.start()
+            activity.join(timeout)
+
+        def is_alive(self) -> bool:
+            return not self.activity_finished.is_set()
+
+    thread = Thread()
+    review_server = ReviewServer("http://127.0.0.1/", listener, thread, Server())  # type: ignore[arg-type]
+    thread.server = review_server
+
+    review_server.shutdown(timeout_seconds=0.1)
+
+    assert review_server.closed
+
+
+def test_stale_watchdog_callback_cannot_shutdown_after_newer_accepted_activity() -> None:
+    """Timer cancellation alone cannot stop a callback that is already runnable."""
+    listener = _listener()
+
+    class Server:
+        should_exit = False
+
+    thread = threading.Thread(target=lambda: None)
+    thread.start()
+    thread.join()
+    review_server = ReviewServer("http://127.0.0.1/", listener, thread, Server())  # type: ignore[arg-type]
+    review_server.reset_idle_timer()
+    stale_generation = review_server._watchdog_generation
+    stale_deadline = review_server._idle_deadline
+    review_server.reset_idle_timer()
+
+    assert stale_deadline is not None
+    review_server._idle_expired(stale_generation, stale_deadline)
+
+    assert not review_server.shutdown_requested
+    assert not Server.should_exit
+    review_server.shutdown()
+
+
+def test_activity_after_shutdown_request_cannot_install_a_new_watchdog() -> None:
+    """A terminal shutdown request must not be undone by a racing accepted request."""
+    listener = _listener()
+
+    class Server:
+        should_exit = False
+
+    thread = threading.Thread(target=lambda: None)
+    thread.start()
+    thread.join()
+    review_server = ReviewServer("http://127.0.0.1/", listener, thread, Server())  # type: ignore[arg-type]
+    review_server.request_shutdown()
+    review_server.reset_idle_timer()
+
+    assert review_server.shutdown_requested
+    assert review_server._idle_timer is None
+    assert review_server._uvicorn.should_exit
+    review_server.shutdown()
+
+
+def test_invalid_traffic_does_not_extend_idle_lifetime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Counting failed token checks or 404s as activity lets an attacker keep the desk alive."""
+    monkeypatch.setattr(review_server_module, "_IDLE_TIMEOUT_SECONDS", 0.12)
+    context = ReviewContext(
+        application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
+    )
+    server = serve_review(context, open_browser=False)
+    base_url = server.url.split("/#", maxsplit=1)[0]
+    try:
+        deadline = time.monotonic() + 0.35
+        while time.monotonic() < deadline and server.thread.is_alive():
+            try:
+                assert httpx.get(base_url + "/missing", timeout=1.0).status_code == 404
+                assert httpx.get(base_url + "/api/policy", timeout=1.0).status_code == 403
+            except httpx.TransportError:
+                break
+            time.sleep(0.02)
+        server.thread.join(timeout=1.0)
+        assert not server.thread.is_alive()
+    finally:
+        server.shutdown()
+
+
+def test_simultaneous_shutdown_callers_close_the_listener_once() -> None:
+    """Competing finalizers must not double-close the listener or leave it open."""
+    close_count = 0
+    close_lock = threading.Lock()
+
+    class Listener:
+        def close(self) -> None:
+            nonlocal close_count
+            with close_lock:
+                close_count += 1
+
+    class Server:
+        should_exit = False
+
+    thread = threading.Thread(target=lambda: None)
+    thread.start()
+    thread.join()
+    review_server = ReviewServer("http://127.0.0.1/", Listener(), thread, Server())  # type: ignore[arg-type]
+    callers = [threading.Thread(target=review_server.shutdown) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+    for caller in callers:
+        caller.join()
+
+    assert review_server.closed
+    assert close_count == 1
+
+
 def _raw_response(host: str, port: int, request: str) -> str:
     with socket.create_connection((host, port), timeout=2.0) as connection:
         connection.sendall(request.encode("ascii"))
@@ -332,3 +491,10 @@ def _raw_response(host: str, port: int, request: str) -> str:
         while chunk := connection.recv(65536):
             chunks.append(chunk)
     return b"".join(chunks).decode("latin1")
+
+
+def _listener() -> socket.socket:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    return listener

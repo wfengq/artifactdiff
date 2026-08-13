@@ -88,9 +88,6 @@ class _LoopbackSecurityMiddleware:
         if not _is_exact_loopback_request(scope):
             await PlainTextResponse("invalid host", status_code=400)(scope, receive, secure_send)
             return
-        activity_callback = scope["app"].state.activity_callback
-        if callable(activity_callback):
-            activity_callback()
         await self.app(scope, receive, secure_send)
 
 
@@ -120,14 +117,18 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
     state = _SessionState(session_token=session_token, csrf_token=csrf_token)
 
     async def shell(_: Request) -> Response:
-        return _asset_response("index.html", "text/html; charset=utf-8")
+        response = _asset_response("index.html", "text/html; charset=utf-8")
+        _record_activity(_.app)
+        return response
 
     async def asset(request: Request) -> Response:
         name = request.path_params["name"]
         media_type = {"app.js": "application/javascript", "styles.css": "text/css"}.get(name)
         if media_type is None:
             return PlainTextResponse("not found", status_code=404)
-        return _asset_response(name, media_type)
+        response = _asset_response(name, media_type)
+        _record_activity(request.app)
+        return response
 
     async def establish_session(request: Request) -> Response:
         with state.lock:
@@ -138,6 +139,7 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
             ):
                 return PlainTextResponse("forbidden", status_code=403)
             state.exchanged = True
+        _record_activity(request.app)
         return JSONResponse({"csrf_token": state.csrf_token})
 
     async def protected(request: Request) -> Response:
@@ -147,6 +149,7 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
             rejected = _reject_mutation(request)
             if rejected is not None:
                 return rejected
+        _record_activity(request.app)
         if request.url.path == "/api/shutdown":
             if state.shutdown_used:
                 return PlainTextResponse("forbidden", status_code=403)
@@ -185,6 +188,12 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
 def _asset_response(name: str, media_type: str) -> Response:
     content = files("artifactdiff.review_web").joinpath("assets", name).read_text(encoding="utf-8")
     return Response(content, media_type=media_type)
+
+
+def _record_activity(app: Starlette) -> None:
+    callback = app.state.activity_callback
+    if callable(callback):
+        callback()
 
 
 def _matches(actual: str | None, expected: str) -> bool:
