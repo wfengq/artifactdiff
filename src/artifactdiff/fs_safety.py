@@ -126,31 +126,3 @@ class PathPolicy:
         if not _contains(root, resolved):
             raise PathSafetyError("output path escaped its configured root")
         return resolved
-
-    def resolve_output_directory(self, path: Path) -> Path:
-        """Resolve an existing generated directory without creating output parents."""
-        for root in self.output_roots:
-            self._recheck_root(root)
-        try:
-            resolved = path.expanduser().resolve(strict=True)
-        except OSError:
-            raise PathSafetyError("output directory is unavailable") from None
-        if not resolved.is_dir() or not any(
-            _contains(root, resolved) for root in self.output_roots
-        ):
-            raise PathSafetyError("output directory is outside configured roots")
-        return resolved
-
-    def resolve_output_file(self, path: Path) -> Path:
-        """Resolve an existing generated file without creating output parents."""
-        for root in self.output_roots:
-            self._recheck_root(root)
-        try:
-            resolved = path.expanduser().resolve(strict=True)
-        except OSError:
-            raise PathSafetyError("output file is unavailable") from None
-        if not resolved.is_file() or not any(
-            _contains(root, resolved) for root in self.output_roots
-        ):
-            raise PathSafetyError("output file is outside configured roots")
-        return resolved

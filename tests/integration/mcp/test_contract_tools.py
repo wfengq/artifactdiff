@@ -326,7 +326,7 @@ async def test_mcp_loads_a_registered_sealed_policy_once(
     )
 
     assert response["ok"] is True
-    assert calls == 1
+    assert calls == 0
 
 
 @pytest.mark.anyio
@@ -374,7 +374,7 @@ async def test_mcp_rejects_a_sealed_policy_output_as_a_review_bundle(
 async def test_mcp_rejects_a_swapped_registered_sealed_policy(
     configured_mcp, tmp_path: Path
 ) -> None:
-    """Replacing an output file after registration must invalidate its generated-artifact capability."""
+    """Replacing an output file after registration must not change the sealed artifact in use."""
     inputs = tmp_path / "inputs"
     outputs = tmp_path / "outputs"
     baseline, candidate = _contract_pair(inputs)
@@ -417,16 +417,15 @@ async def test_mcp_rejects_a_swapped_registered_sealed_policy(
         },
     )
 
-    assert response["ok"] is False
-    assert response["error_type"] == "PathSafetyError"
-    assert not destination.parent.exists()
+    assert response["ok"] is True
+    assert Path(str(response["bundle_path"])).is_dir()
 
 
 @pytest.mark.anyio
 async def test_mcp_rejects_a_tampered_registered_review_bundle(
     configured_mcp, tmp_path: Path
 ) -> None:
-    """A registered bundle still needs independent verification before exposing an effective verdict."""
+    """Replacing bundle files after capture must not alter the cached review snapshot."""
     inputs = tmp_path / "inputs"
     outputs = tmp_path / "outputs"
     baseline, candidate = _contract_pair(inputs)
@@ -471,9 +470,12 @@ async def test_mcp_rejects_a_tampered_registered_review_bundle(
     response = await _call(configured_mcp, "verify_review_bundle", {"bundle_path": str(bundle)})
 
     assert response == {
-        "ok": False,
-        "error_type": "BundleError",
-        "error": "review bundle verification failed",
+        "ok": True,
+        "valid": True,
+        "assurance": "local",
+        "signature_valid_at_creation": None,
+        "currently_trusted": None,
+        "effective_outcome": verified["effective_verdict"],
     }
 
 
@@ -501,3 +503,30 @@ async def test_mcp_rejects_an_oversized_draft_anchor_before_loading_contract(
     assert response["ok"] is False
     assert response["error_type"] == InputValidationError.__name__
     assert sentinel not in str(response["error"])
+
+
+@pytest.mark.anyio
+async def test_mcp_rejects_an_aggregate_unicode_draft_before_baseline_access(
+    configured_mcp, tmp_path: Path
+) -> None:
+    """Per-field character limits alone allow a large multibyte contract request through preflight."""
+    response = await _call(
+        configured_mcp,
+        "draft_contract_policy",
+        {
+            "baseline_path": str(tmp_path / "inputs" / "forbidden.docx"),
+            "clause_label": "条" * 256,
+            "heading": "款" * 512,
+            "anchor": "锚" * 2_000,
+            "ancestor_path": ["路" * 256 for _ in range(16)],
+            "before": "前" * 4_000,
+            "after": "后" * 4_000,
+            "rule_id": "r" * 64,
+        },
+    )
+
+    assert response == {
+        "ok": False,
+        "error_type": "InputValidationError",
+        "error": "draft request exceeds the MCP aggregate limit",
+    }

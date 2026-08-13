@@ -3,23 +3,27 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from functools import wraps
-from hashlib import sha256
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from artifactdiff.application import ArtifactDiffApplication
+from artifactdiff.application import (
+    ArtifactDiffApplication,
+    GeneratedReviewBundleSnapshot,
+    SealedLocalPolicyResult,
+)
 from artifactdiff.contract import ClauseSelector
 from artifactdiff.errors import (
+    ApprovalError,
     ArtifactDiffError,
     BundleError,
     InputValidationError,
     PathSafetyError,
 )
-from artifactdiff.fs_safety import PathPolicy
 from artifactdiff.limits import validate_source
 from artifactdiff.mcp_paths import McpRoots
 from artifactdiff.models import BlockRef, SourceDescriptor
@@ -223,89 +227,70 @@ def _validate_draft_request(
             raise InputValidationError("ancestor_path exceeds the MCP input limit")
         for item in ancestor_path:
             _require_text_budget(item, "ancestor_path item", _MAX_ANCESTOR_ITEM)
+    payload = {
+        "rule_id": rule_id,
+        "selector": {
+            "clause_label": clause_label,
+            "heading": heading,
+            "anchor": anchor,
+            "ancestor_path": ancestor_path or [],
+        },
+        "before": before,
+        "after": after,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    if len(encoded) > _MAX_POLICY_BYTES:
+        raise InputValidationError("draft request exceeds the MCP aggregate limit")
 
 
 @dataclass(frozen=True, slots=True)
 class _GeneratedArtifact:
     kind: str
     path: Path
-    binding: str
+    value: SealedLocalPolicyResult | GeneratedReviewBundleSnapshot
 
 
 class _GeneratedArtifactRegistry:
     """Per-server capabilities for artifacts created by this MCP instance only."""
 
-    def __init__(self, path_policy: PathPolicy) -> None:
-        self._path_policy = path_policy
+    def __init__(self) -> None:
         self._records: dict[Path, _GeneratedArtifact] = {}
 
-    def register_sealed_policy(self, path: Path) -> Path:
-        resolved = self._path_policy.resolve_output_file(path)
-        self._records[resolved] = _GeneratedArtifact(
-            "sealed_policy", resolved, _file_binding(resolved)
-        )
+    def register_sealed_policy(self, result: SealedLocalPolicyResult) -> Path:
+        path = _lexical_absolute(result.path)
+        self._records[path] = _GeneratedArtifact("sealed_policy", path, result)
+        return path
+
+    def register_bundle(self, path: Path, snapshot: GeneratedReviewBundleSnapshot) -> Path:
+        resolved = _lexical_absolute(path)
+        self._records[resolved] = _GeneratedArtifact("review_bundle", resolved, snapshot)
         return resolved
 
-    def register_bundle(self, path: Path) -> Path:
-        resolved = self._path_policy.resolve_output_directory(path)
-        self._records[resolved] = _GeneratedArtifact(
-            "review_bundle", resolved, _bundle_binding(resolved)
-        )
-        return resolved
+    def sealed_policy(self, path: Path) -> SealedLocalPolicyResult | None:
+        value = self._lookup(path, "sealed_policy")
+        return value if isinstance(value, SealedLocalPolicyResult) else None
 
-    def resolve_sealed_policy(self, path: Path) -> Path:
-        return self._resolve(path, "sealed_policy", directory=False)
+    def review_bundle(self, path: Path) -> GeneratedReviewBundleSnapshot | None:
+        value = self._lookup(path, "review_bundle")
+        return value if isinstance(value, GeneratedReviewBundleSnapshot) else None
 
-    def resolve_bundle(self, path: Path) -> Path:
-        return self._resolve(path, "review_bundle", directory=True)
-
-    def _resolve(self, path: Path, kind: str, *, directory: bool) -> Path:
-        try:
-            return (
-                self._path_policy.resolve_input_directory(path)
-                if directory
-                else self._path_policy.resolve_input(path)
-            )
-        except PathSafetyError:
-            resolved = (
-                self._path_policy.resolve_output_directory(path)
-                if directory
-                else self._path_policy.resolve_output_file(path)
-            )
-        record = self._records.get(resolved)
-        if record is None or record.kind != kind:
-            raise PathSafetyError("generated artifact was not created by this MCP instance")
-        actual = _bundle_binding(resolved) if directory else _file_binding(resolved)
-        if actual != record.binding:
-            raise PathSafetyError("generated artifact changed after registration")
-        return resolved
+    def _lookup(
+        self, path: Path, kind: str
+    ) -> SealedLocalPolicyResult | GeneratedReviewBundleSnapshot | None:
+        if not path.is_absolute():
+            return None
+        record = self._records.get(_lexical_absolute(path))
+        if record is None:
+            return None
+        if record.kind != kind:
+            raise PathSafetyError("generated artifact kind does not match this MCP operation")
+        return record.value
 
 
-def _file_binding(path: Path) -> str:
-    if path.is_symlink() or not path.is_file():
-        raise PathSafetyError("generated artifact is unavailable")
-    try:
-        return sha256(path.read_bytes()).hexdigest()
-    except OSError:
-        raise PathSafetyError("generated artifact is unavailable") from None
-
-
-def _bundle_binding(path: Path) -> str:
-    complete = path / "COMPLETE"
-    manifest = path / "core" / "manifest.json"
-    if any(item.is_symlink() or not item.is_file() for item in (complete, manifest)):
-        raise PathSafetyError("generated review bundle is unavailable")
-    try:
-        marker = complete.read_bytes()
-        identity = marker.decode("ascii")
-    except (OSError, UnicodeDecodeError):
-        raise PathSafetyError("generated review bundle is unavailable") from None
-    if len(identity) != 64 or path.name != identity:
-        raise PathSafetyError("generated review bundle is unavailable")
-    try:
-        return f"{identity}:{sha256(manifest.read_bytes()).hexdigest()}"
-    except OSError:
-        raise PathSafetyError("generated review bundle is unavailable") from None
+def _lexical_absolute(path: Path) -> Path:
+    return Path(os.path.abspath(path.expanduser()))
 
 
 def create_mcp(roots: McpRoots | None = None) -> FastMCP:
@@ -317,7 +302,7 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
         if policy is not None
         else None
     )
-    generated = _GeneratedArtifactRegistry(policy) if policy is not None else None
+    generated = _GeneratedArtifactRegistry() if policy is not None else None
     server = FastMCP("ArtifactDiff")
 
     def require_application() -> ArtifactDiffApplication:
@@ -448,7 +433,7 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
     async def seal_local_policy_tool(
         baseline_path: str, policy_path: str, output_path: str
     ) -> dict[str, object]:
-        sealed = require_application().seal_policy(
+        sealed = require_application().seal_local_policy_artifact(
             Path(baseline_path), Path(policy_path), Path(output_path)
         )
         registered = require_generated().register_sealed_policy(sealed)
@@ -464,24 +449,29 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
         visual: bool = True,
     ) -> dict[str, object]:
         app = require_application()
-        bundle = app.verify_local_change(
-            Path(baseline_path),
-            Path(candidate_path),
-            Path(sealed_policy_path),
-            Path(output_path),
-            VerificationOptions(visual=visual),
-            sealed_policy_resolver=require_generated().resolve_sealed_policy,
+        sealed = require_generated().sealed_policy(Path(sealed_policy_path))
+        bundle = (
+            app.verify_local_change_from_artifact(
+                Path(baseline_path),
+                Path(candidate_path),
+                sealed.artifact,
+                Path(output_path),
+                VerificationOptions(visual=visual),
+            )
+            if sealed is not None
+            else app.verify_local_change(
+                Path(baseline_path),
+                Path(candidate_path),
+                Path(sealed_policy_path),
+                Path(output_path),
+                VerificationOptions(visual=visual),
+            )
         )
-        registered_bundle = require_generated().register_bundle(bundle)
-        verification = app.verify_bundle(
-            registered_bundle, bundle_resolver=require_generated().resolve_bundle
-        )
-        effective = app.effective_verdict(
-            registered_bundle, bundle_resolver=require_generated().resolve_bundle
-        )
-        findings = app.list_findings(
-            registered_bundle, bundle_resolver=require_generated().resolve_bundle
-        )
+        snapshot = app.snapshot_generated_local_bundle(bundle)
+        registered_bundle = require_generated().register_bundle(bundle, snapshot)
+        verification = snapshot.verification
+        effective = snapshot.effective_verdict
+        findings = snapshot.findings
         summaries = [_finding_summary(finding) for finding in findings[:_MAX_ITEMS]]
         return {
             "ok": True,
@@ -503,8 +493,11 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
             raise PathSafetyError("finding cursor must be zero or greater")
         if not 1 <= limit <= _MAX_PAGE_SIZE:
             raise PathSafetyError("finding limit must be between 1 and 100")
-        findings = require_application().list_findings(
-            Path(bundle_path), bundle_resolver=require_generated().resolve_bundle
+        snapshot = require_generated().review_bundle(Path(bundle_path))
+        findings = (
+            list(snapshot.findings)
+            if snapshot is not None
+            else require_application().list_findings(Path(bundle_path))
         )
         selected = findings[cursor : cursor + limit]
         return {
@@ -520,24 +513,32 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
     @server.tool(name="get_review_finding")
     @_with_error_boundary
     async def get_review_finding_tool(bundle_path: str, finding_id: str) -> dict[str, object]:
-        finding = require_application().get_finding(
-            Path(bundle_path), finding_id, bundle_resolver=require_generated().resolve_bundle
-        )
+        snapshot = require_generated().review_bundle(Path(bundle_path))
+        if snapshot is None:
+            finding = require_application().get_finding(Path(bundle_path), finding_id)
+        else:
+            matches = [finding for finding in snapshot.findings if finding.id == finding_id]
+            if len(matches) != 1:
+                raise ApprovalError("finding does not exist")
+            finding = matches[0]
         return {"ok": True, "finding": _finding_detail(finding)}
 
     @server.tool(name="verify_review_bundle")
     @_with_error_boundary
     async def verify_review_bundle_tool(bundle_path: str) -> dict[str, object]:
         app = require_application()
-        verification = app.verify_bundle(
-            Path(bundle_path), bundle_resolver=require_generated().resolve_bundle
+        snapshot = require_generated().review_bundle(Path(bundle_path))
+        verification = (
+            snapshot.verification if snapshot is not None else app.verify_bundle(Path(bundle_path))
         )
         if not verification.valid:
             raise BundleError("review bundle verification failed")
         if verification.currently_trusted is False:
             raise BundleError("review bundle trust is no longer valid")
-        effective = app.effective_verdict(
-            Path(bundle_path), bundle_resolver=require_generated().resolve_bundle
+        effective = (
+            snapshot.effective_verdict
+            if snapshot is not None
+            else app.effective_verdict(Path(bundle_path))
         )
         return {
             "ok": True,
