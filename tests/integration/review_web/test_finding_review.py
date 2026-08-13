@@ -7,14 +7,20 @@ import json
 import stat
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
+import artifactdiff.review_web.views as review_views
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.bundle import write_review_bundle
-from artifactdiff.bundle.digests import canonical_bytes
+from artifactdiff.bundle.digests import canonical_bytes, canonical_digest
+from artifactdiff.bundle.events import signed_event_digest
+from artifactdiff.bundle.models import BundleManifest
 from artifactdiff.cli import app as cli_app
+from artifactdiff.errors import ApprovalError
 from artifactdiff.evidence import EvidenceIndex, EvidenceItem, EvidenceKind
 from artifactdiff.policy import EvidenceMode
+from artifactdiff.review import ApprovalDecision, ApprovalEvent
 from artifactdiff.review_web.app import ReviewContext, create_review_app
 from artifactdiff.review_web.signing_provider import (
     FakeSigningProvider,
@@ -143,7 +149,7 @@ def test_review_desk_approves_one_finding_and_updates_effective_verdict(
     assert result.json()["event"]["finding_id"] == finding.id
     assert result.json()["effective_verdict"]["outcome"] == "pass"
     assert result.json()["state"] == "approval-complete"
-    assert result.json()["event_history"][-1]["finding_id"] == finding.id
+    assert result.json()["event_history"]["items"][-1]["finding_id"] == finding.id
     assert result.json()["signature_status"]["event_chain_valid"] is True
     assert signer.approval_calls == [(bundle, finding.id)]
     assert "private_key" not in result.text and "passphrase" not in result.text
@@ -420,15 +426,16 @@ def test_event_history_refuses_foreign_symlink_and_oversized_json(
         link.symlink_to(foreign)
     except OSError:
         pass
-    linked = _event_history(bundle)
+    application = ArtifactDiffApplication(trust_store=bundle_fixture.trust_store)
     if link.exists():
-        assert linked == []
+        with pytest.raises(ApprovalError):
+            _event_history(application, bundle, cursor=0, limit=100)
         link.unlink()
     oversized = bundle / "events" / "000099-approval.json"
     oversized.write_bytes(b"{" + b" " * (1024 * 1024 + 1) + b"}")
-    response = _event_history(bundle)
 
-    assert response == []
+    with pytest.raises(ApprovalError):
+        _event_history(application, bundle, cursor=0, limit=100)
 
 
 def test_event_history_rebinds_manifest_listed_session_event(
@@ -444,7 +451,9 @@ def test_event_history_rebinds_manifest_listed_session_event(
     event_path.chmod(stat.S_IWRITE)
     event_path.write_bytes(canonical_bytes(value))
 
-    assert _event_history(bundle) == []
+    application = ArtifactDiffApplication(trust_store=bundle_fixture.trust_store)
+    with pytest.raises(ApprovalError):
+        _event_history(application, bundle, cursor=0, limit=100)
 
 
 def test_bundle_overview_post_verification_closes_event_read_race(
@@ -456,8 +465,8 @@ def test_bundle_overview_post_verification_closes_event_read_race(
     )
     original = _event_history
 
-    def replace_after_read(path: Path) -> list[dict[str, object]]:
-        history = original(path)
+    def replace_after_read(application, path: Path, *, cursor: int, limit: int):
+        history = original(application, path, cursor=cursor, limit=limit)
         event_path = path / "events" / "000001-session-opened.json"
         value = json.loads(event_path.read_text(encoding="utf-8"))
         value["session_id"] = "e" * 64
@@ -472,3 +481,85 @@ def test_bundle_overview_post_verification_closes_event_read_race(
 
     assert response.status_code == 409
     assert "event_history" not in response.text
+
+
+def test_bundle_overview_rejects_aba_forged_approval_bytes(
+    bundle_fixture: object, monkeypatch
+) -> None:
+    """A forged event read between two valid filesystem states must never reach the browser."""
+    finding = _finding(FindingOutcome.REVIEW, approvable=True, location="clause:aba")
+    bundle = _bundle(bundle_fixture, finding)
+    client, _ = _client(bundle_fixture, bundle)
+    approved = client.post(
+        "/api/approvals",
+        headers=_headers(mutation=True),
+        json={"finding_id": finding.id, "reason": "The genuine signed review reason"},
+    )
+    assert approved.status_code == 200
+    event_path = next((bundle / "events").glob("*-approval.json"))
+    genuine = ApprovalEvent.model_validate_json(event_path.read_bytes())
+    forged = canonical_bytes(genuine.model_copy(update={"reason": "FORGED ABA REASON"}))
+    controlled_read = review_views._read_controlled_file
+
+    def aba_read(root: Path, path: Path, **kwargs) -> bytes | None:
+        if path == event_path:
+            return forged
+        return controlled_read(root, path, **kwargs)
+
+    monkeypatch.setattr(review_views, "_read_controlled_file", aba_read)
+
+    response = client.get("/api/bundle", headers=_headers())
+
+    assert response.status_code == 409
+    assert "FORGED ABA REASON" not in response.text
+
+
+def test_event_history_returns_a_bounded_page_instead_of_empty_for_over_100_events(
+    bundle_fixture: object,
+) -> None:
+    """A long valid approval chain must expose deterministic truncation and continuation metadata."""
+    findings = [
+        _finding(FindingOutcome.REVIEW, approvable=True, location=f"clause:event-{index:03d}")
+        for index in range(101)
+    ]
+    bundle = _bundle(bundle_fixture, *findings)
+    manifest = BundleManifest.model_validate_json(
+        (bundle / "core" / "manifest.json").read_bytes()
+    )
+    previous = canonical_digest(manifest)
+    for sequence, finding in enumerate(findings, start=1):
+        unsigned = {
+            "schema_version": "1.0",
+            "event_type": "finding_decision",
+            "sequence": sequence,
+            "verification_digest": canonical_digest(manifest),
+            "previous_event_digest": previous,
+            "finding_id": finding.id,
+            "decision": ApprovalDecision.APPROVED,
+            "reason": f"Reviewed signed finding number {sequence}",
+        }
+        signature = bundle_fixture.approver_signer.sign(
+            purpose="finding_approval",
+            digest=canonical_digest(unsigned),
+            required_role=TrustRole.FINDING_APPROVER,
+        )
+        event = ApprovalEvent.model_validate({**unsigned, "signature": signature})
+        (bundle / "events" / f"{sequence:06d}-approval.json").write_bytes(
+            canonical_bytes(event)
+        )
+        previous = signed_event_digest(event)
+    client, _ = _client(bundle_fixture, bundle)
+
+    response = client.get(
+        "/api/bundle?event_cursor=0&event_limit=100", headers=_headers()
+    )
+
+    assert response.status_code == 200
+    page = response.json()["event_history"]
+    assert page["total"] == 101
+    assert page["cursor"] == 0
+    assert len(page["items"]) == 100
+    assert page["items"][0]["sequence"] == 1
+    assert page["items"][-1]["sequence"] == 100
+    assert page["next_cursor"] == 100
+    assert page["truncated"] is True

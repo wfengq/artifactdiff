@@ -6,6 +6,7 @@
   let selected = -1;
   let selectionGeneration = 0;
   let renderedFindingId = null;
+  let nextEventCursor = null;
   const fail = () => { status.textContent = "Unable to connect to the local review desk."; };
   const token = new URLSearchParams(location.hash.slice(1)).get("token");
   history.replaceState(null, "", location.pathname);
@@ -64,8 +65,17 @@
     document.getElementById("raw-verdict").textContent = `Raw verdict: ${bundle.raw_verdict}`;
     document.getElementById("effective-verdict").textContent = `Effective verdict: ${bundle.effective_verdict.outcome}`;
     document.getElementById("signature-status").textContent = `Signature at creation: ${bundle.signature_status.valid_at_creation ?? "not present"}; current trust: ${bundle.signature_status.currently_trusted ?? "not applicable"}; event chain: ${bundle.signature_status.event_chain_valid ? "valid" : "invalid"}`;
-    const history = document.getElementById("event-history"); history.replaceChildren();
-    bundle.event_history.forEach((event) => { const item = document.createElement("li"); item.textContent = `${event.sequence}: ${event.event_type}${event.finding_id ? ` · ${event.finding_id}` : ""}${event.decision ? ` · ${event.decision}` : ""}`; history.append(item); });
+    renderEventHistory(bundle.event_history, false);
+  }
+  function renderEventHistory(page, append) {
+    const history = document.getElementById("event-history"); if (!append) history.replaceChildren();
+    page.items.forEach((event) => { const item = document.createElement("li"); item.textContent = `${event.sequence}: ${event.event_type}${event.finding_id ? ` · ${event.finding_id}` : ""}${event.decision ? ` · ${event.decision}` : ""}`; history.append(item); });
+    nextEventCursor = page.next_cursor;
+    const shown = Math.min(page.cursor + page.items.length, page.total);
+    document.getElementById("event-history-status").textContent = page.truncated
+      ? `Showing ${shown} of ${page.total} signed events.`
+      : `Showing all ${page.total} signed events.`;
+    document.getElementById("load-more-events").hidden = nextEventCursor === null;
   }
   function renderFindingList() {
     const list = document.getElementById("finding-list"); list.replaceChildren();
@@ -97,6 +107,11 @@
 
   listen("previous-finding", "click", () => void selectFinding(selected - 1));
   listen("next-finding", "click", () => void selectFinding(selected + 1));
+  listen("load-more-events", "click", async () => {
+    if (nextEventCursor === null) return;
+    const bundle = await request(`/api/bundle?event_cursor=${nextEventCursor}&event_limit=100`, {headers: headers()});
+    renderEventHistory(bundle.event_history, true);
+  });
   if (typeof document.addEventListener === "function") document.addEventListener("keydown", (event) => {
     if (event.altKey && event.key === "ArrowLeft") void selectFinding(selected - 1);
     if (event.altKey && event.key === "ArrowRight") void selectFinding(selected + 1);

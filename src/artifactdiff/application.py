@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 
 from artifactdiff.bundle import (
     BundleAssurance,
+    BundleManifest,
     BundleVerification,
     verify_review_bundle,
     write_review_bundle,
@@ -40,6 +41,7 @@ from artifactdiff.review import (
     approve_finding,
     list_findings,
     load_effective_verdict,
+    validate_approval_event_snapshot,
 )
 from artifactdiff.session import (
     EditSession,
@@ -51,7 +53,7 @@ from artifactdiff.session import (
     write_sealed_policy,
 )
 from artifactdiff.trust import SigningProvider, TrustStore
-from artifactdiff.verification import Finding
+from artifactdiff.verification import Finding, RawVerdict
 from artifactdiff.verification.service import VerificationOptions, verify_contract_change
 
 
@@ -339,6 +341,20 @@ class ArtifactDiffApplication:
     def effective_verdict(self, bundle: Path) -> EffectiveVerdict:
         """Load the fail-closed verdict after independently verifying the bundle."""
         return load_effective_verdict(self._directory_input(bundle), trust_store=self.trust_store)
+
+    def validate_event_snapshot(
+        self,
+        manifest: BundleManifest,
+        raw: RawVerdict,
+        events: tuple[ApprovalEvent, ...],
+    ) -> EffectiveVerdict:
+        """Validate exact event bytes already captured by a bounded adapter read."""
+        return validate_approval_event_snapshot(
+            manifest,
+            raw,
+            events,
+            trust_store=self.trust_store,
+        )
 
     def pack_bundle(
         self,

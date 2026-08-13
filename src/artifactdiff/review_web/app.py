@@ -202,7 +202,10 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
             elif path == "/api/policy/seal":
                 payload = views.seal_policy(await _bounded_json(request))
             elif path == "/api/bundle":
-                payload = views.bundle_overview()
+                payload = views.bundle_overview(
+                    int(request.query_params.get("event_cursor", "0")),
+                    int(request.query_params.get("event_limit", "100")),
+                )
             elif path == "/api/findings":
                 payload = views.list_findings(
                     int(request.query_params.get("cursor", "0")),

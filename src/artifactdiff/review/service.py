@@ -18,7 +18,7 @@ from artifactdiff.bundle.digests import canonical_bytes, canonical_digest
 from artifactdiff.bundle.events import signed_event_digest, unsigned_approval_digest
 from artifactdiff.bundle.models import BundleManifest
 from artifactdiff.bundle.verifier import verify_review_bundle
-from artifactdiff.errors import ApprovalError
+from artifactdiff.errors import ApprovalError, SignatureError
 from artifactdiff.review.models import ApprovalDecision, ApprovalEvent, EffectiveVerdict
 from artifactdiff.trust import SigningProvider, TrustRole, TrustStore, verify_signature
 from artifactdiff.verification import Finding, FindingOutcome, RawVerdict
@@ -165,6 +165,40 @@ def compute_effective_verdict(
     )
 
 
+def validate_approval_event_snapshot(
+    manifest: BundleManifest,
+    raw: RawVerdict,
+    events: Sequence[ApprovalEvent],
+    *,
+    trust_store: TrustStore,
+) -> EffectiveVerdict:
+    """Validate the exact in-memory approval bytes as one manifest-bound chain."""
+    manifest_digest = canonical_digest(manifest)
+    expected_sequence = 2 if manifest.event_chain_head is not None else 1
+    expected_previous = manifest.event_chain_head or manifest_digest
+    for event in events:
+        if (
+            event.sequence != expected_sequence
+            or event.previous_event_digest != expected_previous
+        ):
+            raise ApprovalError("approval event chain is invalid")
+        expected_sequence += 1
+        expected_previous = signed_event_digest(event)
+    try:
+        effective = compute_effective_verdict(
+            raw,
+            events,
+            trust_store=trust_store,
+            verification_digest=manifest_digest,
+        )
+    except SignatureError:
+        raise ApprovalError("approval event signature is invalid") from None
+    expected_head = expected_previous
+    if effective.event_chain_head != expected_head:
+        effective = effective.model_copy(update={"event_chain_head": expected_head})
+    return effective
+
+
 def load_effective_verdict(bundle: Path, *, trust_store: TrustStore) -> EffectiveVerdict:
     root = _root(bundle)
     verification = verify_review_bundle(root, trust_store=trust_store)
@@ -172,15 +206,12 @@ def load_effective_verdict(bundle: Path, *, trust_store: TrustStore) -> Effectiv
         raise ApprovalError("review bundle verification failed")
     manifest = _manifest(root)
     events = _approval_events(root)
-    effective = compute_effective_verdict(
+    return validate_approval_event_snapshot(
+        manifest,
         _verdict(root),
         events,
         trust_store=trust_store,
-        verification_digest=canonical_digest(manifest),
     )
-    if not events and manifest.event_chain_head is not None:
-        effective = effective.model_copy(update={"event_chain_head": manifest.event_chain_head})
-    return effective
 
 
 def _process_is_alive(pid: int) -> bool:

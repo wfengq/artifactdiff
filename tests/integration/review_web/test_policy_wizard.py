@@ -275,6 +275,10 @@ def test_static_assets_are_offline_accessible_and_use_no_html_insertion(tmp_path
     assert "textContent" in script
     assert 'aria-live="polite"' in shell
     assert "Previous finding" in shell and "Next finding" in shell
+    assert 'id="event-history-status"' in shell
+    assert 'id="load-more-events"' in shell
+    assert "page.items" in script and "page.truncated" in script
+    assert "event_cursor=${nextEventCursor}" in script
 
 
 def test_interactive_policy_create_opens_wizard_unless_no_open_is_set(

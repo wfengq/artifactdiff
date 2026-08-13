@@ -32,7 +32,7 @@ from artifactdiff.policy.models import PolicyPluginRequirement
 from artifactdiff.review import ApprovalEvent
 from artifactdiff.review_web.signing_provider import ReviewSigningProvider
 from artifactdiff.session import SealedPolicyArtifact, SessionOpenedEvent, write_sealed_policy
-from artifactdiff.verification import Finding, FindingOutcome
+from artifactdiff.verification import Finding, FindingOutcome, RawVerdict
 
 
 class _ViewModel(BaseModel):
@@ -175,12 +175,19 @@ class ReviewViews:
             "output": str(self.output_path.resolve()),
         }
 
-    def bundle_overview(self) -> dict[str, object]:
+    def bundle_overview(self, event_cursor: int = 0, event_limit: int = 100) -> dict[str, object]:
         self._require_mode("bundle")
         verification = self._verified_bundle()
+        event_history, snapshot_head = _event_history(
+            self.application,
+            self.target_path,
+            cursor=event_cursor,
+            limit=event_limit,
+        )
         effective = self.application.effective_verdict(self.target_path)
-        event_history = _event_history(self.target_path)
-        self._verified_bundle()
+        if effective.event_chain_head != snapshot_head:
+            raise ApprovalError("review bundle changed while reading event history")
+        verification = self._verified_bundle()
         return {
             "state": f"bundle-{effective.outcome.value}",
             "assurance": verification.assurance.value,
@@ -383,39 +390,73 @@ def _crop_payloads(bundle: Path, finding: Finding) -> list[dict[str, str]]:
     return crops
 
 
-def _event_history(bundle: Path) -> list[dict[str, object]]:
+def _event_history(
+    application: ArtifactDiffApplication,
+    bundle: Path,
+    *,
+    cursor: int,
+    limit: int,
+) -> tuple[dict[str, object], str]:
+    if cursor < 0 or limit < 1 or limit > 100:
+        raise ApprovalError("invalid event history page")
     root = _normalized_bundle_root(bundle)
     if root is None:
-        return []
+        raise ApprovalError("invalid review bundle path")
     manifest_raw = _read_controlled_file(
         root, root / "core" / "manifest.json", maximum=1024 * 1024
     )
     if manifest_raw is None:
-        return []
+        raise ApprovalError("invalid review bundle manifest")
     try:
         manifest = BundleManifest.model_validate_json(manifest_raw)
     except (ValidationError, RecursionError, TypeError, ValueError):
-        return []
+        raise ApprovalError("invalid review bundle manifest") from None
     if manifest_raw != canonical_bytes(manifest):
-        return []
+        raise ApprovalError("invalid review bundle manifest")
     expected = {item.path: item for item in manifest.payloads if item.path.startswith("events/")}
-    history: list[dict[str, object]] = []
+    verdict_payload = next(
+        (item for item in manifest.payloads if item.path == "core/verdict.json"), None
+    )
+    if verdict_payload is None:
+        raise ApprovalError("invalid review bundle verdict")
+    verdict_raw = _read_controlled_file(
+        root,
+        root / "core" / "verdict.json",
+        maximum=10 * 1024 * 1024,
+        expected_size=verdict_payload.size_bytes,
+        expected_sha256=verdict_payload.sha256,
+    )
+    if verdict_raw is None:
+        raise ApprovalError("invalid review bundle verdict")
+    try:
+        verdict = RawVerdict.model_validate_json(verdict_raw)
+    except (ValidationError, RecursionError, TypeError, ValueError):
+        raise ApprovalError("invalid review bundle verdict") from None
+    if verdict_raw != canonical_bytes(verdict):
+        raise ApprovalError("invalid review bundle verdict")
+    events: list[SessionOpenedEvent | ApprovalEvent] = []
+    approvals: list[ApprovalEvent] = []
     total_bytes = 0
     try:
-        paths = sorted((root / "events").glob("*.json"))[:101]
-        if len(paths) > 100:
-            return []
+        paths: list[Path] = []
+        for path in (root / "events").iterdir():
+            if path.suffix.casefold() != ".json":
+                continue
+            paths.append(path)
+            if len(paths) > 1001:
+                raise ApprovalError("event history exceeds the bounded bundle model")
+        paths.sort()
         for path in paths:
             relative = path.relative_to(root).as_posix()
             payload = expected.get(relative)
             if path.name == "000001-session-opened.json":
                 if payload is None:
-                    return []
+                    raise ApprovalError("invalid session event binding")
                 model: type[SessionOpenedEvent | ApprovalEvent] = SessionOpenedEvent
             elif path.name.endswith("-approval.json"):
                 model = ApprovalEvent
             else:
-                return []
+                raise ApprovalError("invalid event history file")
             raw = _read_controlled_file(
                 root,
                 path,
@@ -423,23 +464,43 @@ def _event_history(bundle: Path) -> list[dict[str, object]]:
                 expected_size=payload.size_bytes if payload is not None else None,
                 expected_sha256=payload.sha256 if payload is not None else None,
             )
-            if raw is None or total_bytes + len(raw) > 2 * 1024 * 1024:
-                return []
+            if raw is None or total_bytes + len(raw) > 12 * 1024 * 1024:
+                raise ApprovalError("invalid event history file")
             value = model.model_validate_json(raw)
             if raw != canonical_bytes(value):
-                return []
+                raise ApprovalError("invalid event history file")
             total_bytes += len(raw)
-            serialized = value.model_dump(mode="json")
-            history.append(
-                {
-                    key: serialized[key]
-                    for key in ("sequence", "event_type", "finding_id", "decision", "reason")
-                    if key in serialized
-                }
-            )
+            events.append(value)
+            if isinstance(value, ApprovalEvent):
+                approvals.append(value)
+    except ApprovalError:
+        raise
     except (OSError, ValidationError, RecursionError, TypeError, ValueError):
-        return []
-    return history
+        raise ApprovalError("invalid event history file") from None
+    effective = application.validate_event_snapshot(manifest, verdict, tuple(approvals))
+    total = len(events)
+    selected = events[cursor : cursor + limit]
+    items: list[dict[str, object]] = []
+    for value in selected:
+        serialized = value.model_dump(mode="json")
+        items.append(
+            {
+                key: serialized[key]
+                for key in ("sequence", "event_type", "finding_id", "decision", "reason")
+                if key in serialized
+            }
+        )
+    next_cursor = cursor + len(selected) if cursor + len(selected) < total else None
+    return (
+        {
+            "items": items,
+            "total": total,
+            "cursor": cursor,
+            "next_cursor": next_cursor,
+            "truncated": next_cursor is not None,
+        },
+        effective.event_chain_head,
+    )
 
 
 def _normalized_bundle_root(bundle: Path) -> Path | None:

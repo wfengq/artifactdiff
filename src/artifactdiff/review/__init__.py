@@ -6,6 +6,7 @@ from artifactdiff.review.service import (
     compute_effective_verdict,
     list_findings,
     load_effective_verdict,
+    validate_approval_event_snapshot,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "compute_effective_verdict",
     "list_findings",
     "load_effective_verdict",
+    "validate_approval_event_snapshot",
 ]
