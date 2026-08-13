@@ -20,7 +20,13 @@ from artifactdiff.bundle.models import BundleManifest
 from artifactdiff.bundle.verifier import verify_review_bundle
 from artifactdiff.errors import ApprovalError, SignatureError
 from artifactdiff.review.models import ApprovalDecision, ApprovalEvent, EffectiveVerdict
-from artifactdiff.trust import SigningProvider, TrustRole, TrustStore, verify_signature
+from artifactdiff.trust import (
+    SigningProvider,
+    TrustRole,
+    TrustStore,
+    inspect_signature,
+    verify_signature,
+)
 from artifactdiff.verification import Finding, FindingOutcome, RawVerdict
 
 _APPROVAL_FILE = re.compile(r"^(\d{6})-approval\.json$")
@@ -97,6 +103,7 @@ def compute_effective_verdict(
     *,
     trust_store: TrustStore,
     verification_digest: str,
+    require_current_trust: bool = True,
 ) -> EffectiveVerdict:
     """Validate signed decisions and recompute the fail-closed effective outcome."""
     try:
@@ -124,13 +131,29 @@ def compute_effective_verdict(
             raise ApprovalError("approval event references an ineligible finding")
         if event.finding_id in decided:
             raise ApprovalError("finding already has a decision")
-        identity = verify_signature(
-            event.signature,
-            purpose="finding_approval",
-            digest=unsigned_approval_digest(event),
-            required_role=TrustRole.FINDING_APPROVER,
-            trust_store=trust_store,
-        )
+        if require_current_trust:
+            identity = verify_signature(
+                event.signature,
+                purpose="finding_approval",
+                digest=unsigned_approval_digest(event),
+                required_role=TrustRole.FINDING_APPROVER,
+                trust_store=trust_store,
+            )
+        else:
+            inspection = inspect_signature(
+                event.signature,
+                purpose="finding_approval",
+                digest=unsigned_approval_digest(event),
+                required_role=TrustRole.FINDING_APPROVER,
+                trust_store=trust_store,
+            )
+            if (
+                not inspection.signature_valid
+                or inspection.identity is None
+                or TrustRole.FINDING_APPROVER not in inspection.identity.roles
+            ):
+                raise SignatureError("approval signature is historically invalid")
+            identity = inspection.identity
         if identity.subject_type != "human":
             raise ApprovalError("finding approvals require a human identity")
         decided[event.finding_id] = event.decision
@@ -171,6 +194,7 @@ def validate_approval_event_snapshot(
     events: Sequence[ApprovalEvent],
     *,
     trust_store: TrustStore,
+    require_current_trust: bool = True,
 ) -> EffectiveVerdict:
     """Validate the exact in-memory approval bytes as one manifest-bound chain."""
     manifest_digest = canonical_digest(manifest)
@@ -187,6 +211,7 @@ def validate_approval_event_snapshot(
             events,
             trust_store=trust_store,
             verification_digest=manifest_digest,
+            require_current_trust=require_current_trust,
         )
     except SignatureError:
         raise ApprovalError("approval event signature is invalid") from None

@@ -52,11 +52,12 @@
     </section>
     <section aria-labelledby="evidence-heading">
       <h2 id="evidence-heading">Authorized evidence</h2>
+      {% if evidence_mode == "full" %}<p class="warning" role="alert">Sensitive-data warning: full evidence mode may contain complete contract pages and substantially more contract content.</p>{% endif %}
       {% if visual_unavailable %}<p class="warning" role="alert">Visual evidence is unavailable. Review the semantic findings and the policy's visual-unavailable rule.</p>{% endif %}
       {% for excerpt in excerpts %}<article><h3>{{ excerpt.path }}</h3><pre>{{ excerpt.text }}</pre></article>{% endfor %}
       {% for image in images %}<figure><figcaption>{{ image.kind }} · {{ image.path }}</figcaption><img data-evidence-kind="{{ image.kind }}" src="{{ image.data_url }}" alt="Authorized {{ image.kind }} evidence"></figure>{% endfor %}
     </section>
-    <section aria-labelledby="signatures-heading"><h2 id="signatures-heading">Signatures and trust</h2>{% if signatures %}<table><thead><tr><th>Artifact</th><th>Identity</th><th>Purpose</th><th>Fingerprint</th><th>Claimed time</th></tr></thead><tbody>{% for signature in signatures %}<tr><td>{{ signature.label }}</td><td>{{ signature.identity }}</td><td>{{ signature.purpose }}</td><td><code>{{ signature.fingerprint }}</code></td><td>{{ signature.claimed_signing_time or "Not claimed" }}</td></tr>{% endfor %}</tbody></table>{% else %}<p>No signatures: local assurance.</p>{% endif %}</section>
+    <section aria-labelledby="signatures-heading"><h2 id="signatures-heading">Signatures and trust</h2><p class="warning">A claimed signing time is not proof of chronology. Only separately validated trusted-time evidence can strengthen that claim.</p>{% if signatures %}<table><thead><tr><th>Artifact</th><th>Identity</th><th>Purpose</th><th>Fingerprint</th><th>Claimed time</th><th>Trusted time</th></tr></thead><tbody>{% for signature in signatures %}<tr><td>{{ signature.label }}</td><td>{{ signature.identity }}</td><td>{{ signature.purpose }}</td><td><code>{{ signature.fingerprint }}</code></td><td>{{ signature.claimed_signing_time or "Not claimed" }}</td><td>{{ signature.trusted_time }}</td></tr>{% endfor %}</tbody></table>{% else %}<p>No signatures: local assurance.</p>{% endif %}</section>
     <section aria-labelledby="history-heading"><h2 id="history-heading">Approval history</h2>{% for event in history %}<article><h3>Event {{ event.sequence }} · {{ event.event_type }}</h3><p>Identity: {{ event.identity }}</p>{% if event.finding_id is defined %}<p>Finding: {{ event.finding_id }} · {{ event.decision }}</p><p>Reason: {{ event.reason }}</p>{% endif %}</article>{% else %}<p>No signed events.</p>{% endfor %}</section>
   </main>
 </body>

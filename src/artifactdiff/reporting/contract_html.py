@@ -17,16 +17,26 @@ from pydantic import BaseModel, ValidationError
 from artifactdiff.bundle.digests import canonical_bytes, canonical_digest
 from artifactdiff.bundle.models import BundleManifest
 from artifactdiff.bundle.verifier import verify_review_bundle
-from artifactdiff.errors import BundleError
+from artifactdiff.errors import BundleError, PolicyValidationError
 from artifactdiff.evidence import EvidenceIndex, EvidenceKind
-from artifactdiff.policy import ContractPolicy, FrozenPolicy
+from artifactdiff.policy import (
+    ContractPolicy,
+    FrozenPolicy,
+    frozen_policy_digest,
+    validate_frozen_policy_integrity,
+)
 from artifactdiff.review import (
     ApprovalEvent,
-    load_effective_verdict,
     validate_approval_event_snapshot,
 )
 from artifactdiff.session import SessionOpenedEvent
-from artifactdiff.trust import PolicyAuthorization, SignatureEnvelope, TrustStore
+from artifactdiff.trust import (
+    PolicyAuthorization,
+    SignatureEnvelope,
+    TrustRole,
+    TrustStore,
+    inspect_signature,
+)
 from artifactdiff.verification import RawVerdict
 
 _MAX_CORE_BYTES = 10 * 1024 * 1024
@@ -124,8 +134,16 @@ def _model(
     model: type[BaseModel],
     *,
     maximum: int = _MAX_CORE_BYTES,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
 ) -> BaseModel:
-    raw = _read(root, root / Path(relative), maximum=maximum)
+    raw = _read(
+        root,
+        root / Path(relative),
+        maximum=maximum,
+        expected_size=expected_size,
+        expected_sha256=expected_sha256,
+    )
     try:
         value = model.model_validate_json(raw)
     except (ValidationError, RecursionError, TypeError, ValueError):
@@ -215,15 +233,26 @@ def _evidence_payloads(
 
 def _events(
     root: Path, manifest: BundleManifest
-) -> tuple[tuple[ApprovalEvent, ...], tuple[dict[str, object], ...], tuple[dict[str, object], ...]]:
+) -> tuple[
+    tuple[ApprovalEvent, ...],
+    tuple[SessionOpenedEvent, ...],
+    tuple[dict[str, object], ...],
+    tuple[dict[str, object], ...],
+]:
     try:
-        paths = sorted(path for path in (root / "events").iterdir() if path.suffix == ".json")
+        paths: list[Path] = []
+        for path in (root / "events").iterdir():
+            if path.suffix != ".json":
+                continue
+            paths.append(path)
+            if len(paths) > _MAX_EVENTS:
+                raise BundleError("contract report event history exceeds the bounded model")
+        paths.sort()
     except OSError:
         raise BundleError("contract report event history is unavailable") from None
-    if len(paths) > _MAX_EVENTS:
-        raise BundleError("contract report event history exceeds the bounded model")
     manifest_payloads = {item.path: item for item in manifest.payloads}
     approvals: list[ApprovalEvent] = []
+    sessions: list[SessionOpenedEvent] = []
     history: list[dict[str, object]] = []
     signatures: list[dict[str, object]] = []
     for path in paths:
@@ -269,44 +298,118 @@ def _events(
                 decision=event.decision.value,
                 reason=event.reason,
             )
+        else:
+            sessions.append(event)
         history.append(item)
-    return tuple(approvals), tuple(history), tuple(signatures)
+    return tuple(approvals), tuple(sessions), tuple(history), tuple(signatures)
 
 
 def _capture(bundle: Path, trust_store: TrustStore) -> tuple[_CapturedBundle, Any, Any]:
     root = _root(bundle)
-    first = verify_review_bundle(root, trust_store=trust_store)
-    if not first.valid:
-        raise BundleError("contract report requires a valid bundle verification")
     manifest = _model(root, "core/manifest.json", BundleManifest)
-    policy = _model(root, "core/policy.json", FrozenPolicy)
-    verdict = _model(root, "core/verdict.json", RawVerdict)
-    evidence = _model(root, "core/evidence/index.json", EvidenceIndex)
     assert isinstance(manifest, BundleManifest)
+    manifest_digest = canonical_digest(manifest)
+    complete = _read(root, root / "COMPLETE", maximum=64)
+    if complete != manifest_digest.encode("ascii") or root.name != manifest_digest:
+        raise BundleError("contract report manifest snapshot is not content-addressed")
+    payloads = {item.path: item for item in manifest.payloads}
+
+    def captured_model(relative: str, model: type[BaseModel]) -> BaseModel:
+        payload = payloads.get(relative)
+        if payload is None:
+            raise BundleError("contract report manifest payload is missing")
+        return _model(
+            root,
+            relative,
+            model,
+            expected_size=payload.size_bytes,
+            expected_sha256=payload.sha256,
+        )
+
+    policy = captured_model("core/policy.json", FrozenPolicy)
+    verdict = captured_model("core/verdict.json", RawVerdict)
+    evidence = captured_model("core/evidence/index.json", EvidenceIndex)
     assert isinstance(policy, FrozenPolicy)
     assert isinstance(verdict, RawVerdict)
     assert isinstance(evidence, EvidenceIndex)
+    try:
+        policy = validate_frozen_policy_integrity(policy)
+    except PolicyValidationError:
+        raise BundleError("contract report policy snapshot is invalid") from None
+    if (
+        frozen_policy_digest(policy) != manifest.policy_sha256
+        or canonical_digest(verdict) != manifest.raw_verdict_sha256
+        or verdict.policy_sha256 != policy.canonical_sha256
+        or verdict.baseline_sha256 != manifest.baseline_sha256
+        or verdict.candidate_sha256 != manifest.candidate_sha256
+    ):
+        raise BundleError("contract report snapshot cross-digest is invalid")
+    if policy.policy.evidence.mode is not evidence.mode:
+        raise BundleError("contract report policy and evidence mode do not match")
+    first = verify_review_bundle(root, trust_store=trust_store)
+    if not first.valid:
+        raise BundleError("contract report requires a valid bundle verification")
     images, excerpts = _evidence_payloads(root, manifest, evidence)
-    approvals, history, event_signatures = _events(root, manifest)
+    approvals, sessions, history, event_signatures = _events(root, manifest)
     effective = validate_approval_event_snapshot(
-        manifest, verdict, approvals, trust_store=trust_store
+        manifest,
+        verdict,
+        approvals,
+        trust_store=trust_store,
+        require_current_trust=False,
     )
     signatures: list[dict[str, object]] = []
+    for session in sessions:
+        session_payload = session.model_dump(mode="json", exclude={"signature"}, warnings="error")
+        inspection = inspect_signature(
+            session.signature,
+            purpose="session_opened",
+            digest=canonical_digest(dict(session_payload)),
+            required_role=TrustRole.ARCHIVE_SIGNER,
+            trust_store=trust_store,
+        )
+        if not inspection.signature_valid:
+            raise BundleError("contract report session signature snapshot is invalid")
     policy_signature = root / "core" / "policy.sig"
     if policy_signature.exists():
-        authorization = _model(root, "core/policy.sig", PolicyAuthorization)
+        authorization = captured_model("core/policy.sig", PolicyAuthorization)
         assert isinstance(authorization, PolicyAuthorization)
         signatures.append(_signature("Policy authorization", authorization.signature))
+        policy_inspection = inspect_signature(
+            authorization.signature,
+            purpose="policy_authorization",
+            digest=manifest.policy_sha256,
+            required_role=TrustRole.POLICY_AUTHORIZER,
+            trust_store=trust_store,
+        )
+        if not policy_inspection.signature_valid:
+            raise BundleError("contract report policy signature snapshot is invalid")
     manifest_signature = root / "core" / "manifest.sig"
     if manifest_signature.exists():
         envelope = _model(root, "core/manifest.sig", SignatureEnvelope)
         assert isinstance(envelope, SignatureEnvelope)
+        manifest_inspection = inspect_signature(
+            envelope,
+            purpose="bundle_manifest",
+            digest=manifest_digest,
+            required_role=TrustRole.ARCHIVE_SIGNER,
+            trust_store=trust_store,
+        )
+        if not manifest_inspection.signature_valid:
+            raise BundleError("contract report manifest signature snapshot is invalid")
         signatures.append(_signature("Bundle manifest", envelope))
     signatures.extend(event_signatures)
     second = verify_review_bundle(root, trust_store=trust_store)
     if not second.valid or second != first:
         raise BundleError("contract report bundle changed while reading")
-    current_effective = load_effective_verdict(root, trust_store=trust_store)
+    current_approvals, _, _, _ = _events(root, manifest)
+    current_effective = validate_approval_event_snapshot(
+        manifest,
+        verdict,
+        current_approvals,
+        trust_store=trust_store,
+        require_current_trust=False,
+    )
     if current_effective.event_chain_head != effective.event_chain_head:
         raise BundleError("contract report bundle changed while reading")
     captured = _CapturedBundle(
@@ -413,19 +516,34 @@ def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) 
         manifest_sha256=canonical_digest(captured.manifest),
     )
     try:
-        if output.is_symlink() or output.exists():
-            raise BundleError("contract report output must be new")
         output.parent.mkdir(parents=True, exist_ok=True)
         parent = output.parent.resolve(strict=True)
         if output.parent.is_symlink():
             raise BundleError("contract report output path is unsafe")
+        parent_status = parent.stat()
+        final = parent / output.name
+        if final.is_symlink() or final.exists():
+            raise BundleError("contract report output must be new")
         temporary = parent / f".{output.name}.{secrets.token_hex(8)}.tmp"
         with temporary.open("xb") as stream:
             stream.write(rendered.encode("utf-8"))
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.replace(output)
-        return output
+        current_parent = parent.stat()
+        if (current_parent.st_dev, current_parent.st_ino) != (
+            parent_status.st_dev,
+            parent_status.st_ino,
+        ) or output.parent.resolve(strict=True) != parent:
+            raise BundleError("contract report output parent changed")
+        try:
+            os.link(temporary, final)
+        except FileExistsError:
+            raise BundleError("contract report output must be new") from None
+        if final.is_symlink() or final.stat().st_size != temporary.stat().st_size:
+            final.unlink(missing_ok=True)
+            raise BundleError("contract report output publication failed")
+        temporary.unlink()
+        return final
     except BundleError:
         raise
     except OSError:
