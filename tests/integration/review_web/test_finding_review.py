@@ -384,9 +384,7 @@ def test_crop_payloads_refuse_symlinked_evidence(tmp_path: Path) -> None:
     assert _crop_payloads(tmp_path / "bundle", finding) == []
 
 
-def test_relative_bundle_root_authorizes_finding_crops(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_relative_bundle_root_authorizes_finding_crops(tmp_path: Path, monkeypatch) -> None:
     """Relative CLI bundle paths must resolve once before evidence confinement checks."""
     finding = _finding(FindingOutcome.REVIEW, approvable=True, location="clause:relative")
     bundle = tmp_path / "bundle"
@@ -523,9 +521,7 @@ def test_event_history_returns_a_bounded_page_instead_of_empty_for_over_100_even
         for index in range(101)
     ]
     bundle = _bundle(bundle_fixture, *findings)
-    manifest = BundleManifest.model_validate_json(
-        (bundle / "core" / "manifest.json").read_bytes()
-    )
+    manifest = BundleManifest.model_validate_json((bundle / "core" / "manifest.json").read_bytes())
     previous = canonical_digest(manifest)
     for sequence, finding in enumerate(findings, start=1):
         unsigned = {
@@ -544,15 +540,11 @@ def test_event_history_returns_a_bounded_page_instead_of_empty_for_over_100_even
             required_role=TrustRole.FINDING_APPROVER,
         )
         event = ApprovalEvent.model_validate({**unsigned, "signature": signature})
-        (bundle / "events" / f"{sequence:06d}-approval.json").write_bytes(
-            canonical_bytes(event)
-        )
+        (bundle / "events" / f"{sequence:06d}-approval.json").write_bytes(canonical_bytes(event))
         previous = signed_event_digest(event)
     client, _ = _client(bundle_fixture, bundle)
 
-    response = client.get(
-        "/api/bundle?event_cursor=0&event_limit=100", headers=_headers()
-    )
+    response = client.get("/api/bundle?event_cursor=0&event_limit=100", headers=_headers())
 
     assert response.status_code == 200
     page = response.json()["event_history"]

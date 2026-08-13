@@ -402,9 +402,7 @@ def _event_history(
     root = _normalized_bundle_root(bundle)
     if root is None:
         raise ApprovalError("invalid review bundle path")
-    manifest_raw = _read_controlled_file(
-        root, root / "core" / "manifest.json", maximum=1024 * 1024
-    )
+    manifest_raw = _read_controlled_file(root, root / "core" / "manifest.json", maximum=1024 * 1024)
     if manifest_raw is None:
         raise ApprovalError("invalid review bundle manifest")
     try:
@@ -561,10 +559,7 @@ def _read_controlled_file(
         or before.st_size != after.st_size
         or before.st_mtime_ns != after.st_mtime_ns
         or (expected_size is not None and len(contents) != expected_size)
-        or (
-            expected_sha256 is not None
-            and hashlib.sha256(contents).hexdigest() != expected_sha256
-        )
+        or (expected_sha256 is not None and hashlib.sha256(contents).hexdigest() != expected_sha256)
     ):
         return None
     return contents

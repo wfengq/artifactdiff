@@ -177,10 +177,7 @@ def validate_approval_event_snapshot(
     expected_sequence = 2 if manifest.event_chain_head is not None else 1
     expected_previous = manifest.event_chain_head or manifest_digest
     for event in events:
-        if (
-            event.sequence != expected_sequence
-            or event.previous_event_digest != expected_previous
-        ):
+        if event.sequence != expected_sequence or event.previous_event_digest != expected_previous:
             raise ApprovalError("approval event chain is invalid")
         expected_sequence += 1
         expected_previous = signed_event_digest(event)

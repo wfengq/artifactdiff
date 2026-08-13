@@ -235,14 +235,13 @@ def test_verified_wizard_seal_durably_writes_an_authorized_artifact(tmp_path: Pa
     )
     app.state.bound_host = "127.0.0.1:8765"
     client = AsgiClient(app, base_url=BASE_URL)
-    assert client.post(
-        "/api/session", headers={"X-ArtifactDiff-Session": SESSION_TOKEN}
-    ).status_code == 200
+    assert (
+        client.post("/api/session", headers={"X-ArtifactDiff-Session": SESSION_TOKEN}).status_code
+        == 200
+    )
     assert client.post("/api/policy", headers=_headers(), json=_payload()).status_code == 200
 
-    sealed = client.post(
-        "/api/policy/seal", headers=_headers(), json={"assurance": "verified"}
-    )
+    sealed = client.post("/api/policy/seal", headers=_headers(), json={"assurance": "verified"})
 
     assert sealed.status_code == 200
     assert load_sealed_policy(output).authorization is not None
@@ -404,12 +403,29 @@ def test_noninteractive_signing_intent_never_writes_an_unsigned_draft(tmp_path: 
     result = CliRunner().invoke(
         cli_app,
         [
-            "policy", "create", str(baseline), "-o", str(output),
-            "--rule-id", "payment-window", "--clause", "Article II",
-            "--heading", "Payment Terms", "--anchor", _payload()["selector"]["anchor"],
-            "--before", "30 days", "--after", "45 days",
-            "--sign", "authorizer", "--key", str(tmp_path / "key.pem"),
-            "--trust-store", str(trust),
+            "policy",
+            "create",
+            str(baseline),
+            "-o",
+            str(output),
+            "--rule-id",
+            "payment-window",
+            "--clause",
+            "Article II",
+            "--heading",
+            "Payment Terms",
+            "--anchor",
+            _payload()["selector"]["anchor"],
+            "--before",
+            "30 days",
+            "--after",
+            "45 days",
+            "--sign",
+            "authorizer",
+            "--key",
+            str(tmp_path / "key.pem"),
+            "--trust-store",
+            str(trust),
         ],
     )
 
