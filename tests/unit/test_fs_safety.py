@@ -98,3 +98,22 @@ def test_input_must_exist_inside_an_allowed_root(tmp_path: Path) -> None:
         policy.resolve_input(outside)
     with pytest.raises(PathSafetyError):
         policy.resolve_input(input_root / "missing.docx")
+
+
+def test_directory_input_must_resolve_inside_an_allowed_root(tmp_path: Path) -> None:
+    """Treating a symlinked bundle directory as trusted would escape the input root."""
+    input_root = tmp_path / "input"
+    output_root = tmp_path / "output"
+    outside = tmp_path / "outside"
+    input_root.mkdir()
+    output_root.mkdir()
+    outside.mkdir()
+    bundle = input_root / "bundle"
+    bundle.mkdir()
+    escape = input_root / "escape"
+    _symlink_or_skip(escape, outside, directory=True)
+    policy = PathPolicy(input_roots=(input_root,), output_roots=(output_root,))
+
+    assert policy.resolve_input_directory(bundle) == bundle.resolve()
+    with pytest.raises(PathSafetyError):
+        policy.resolve_input_directory(escape)

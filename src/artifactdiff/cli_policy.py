@@ -11,7 +11,6 @@ from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.cli_support import exit_for_error, interactive_signer, trust_store_from
 from artifactdiff.contract import ClauseSelector
 from artifactdiff.errors import ArtifactDiffError, PolicyValidationError
-from artifactdiff.policy import policy_digest
 
 policy_app = typer.Typer(no_args_is_help=True)
 
@@ -52,8 +51,6 @@ def create(
             before=_required(before, "before"),
             after=_required(after, "after"),
         )
-        if output.exists():
-            output.unlink()
         application.write_policy(policy, output)
     except ArtifactDiffError as error:
         exit_for_error(error)
@@ -66,17 +63,10 @@ def validate(baseline: Path, policy: Path) -> None:
     try:
         application = ArtifactDiffApplication(trust_store=trust_store_from(None))
         checked = application.validate_policy(baseline, policy)
-        contract = application.inspect_contract(baseline)
-        matching = [
-            clause["id"]
-            for clause in contract["clauses"]
-            if isinstance(clause, dict)
-            and clause.get("fingerprint") == checked.expect[0].selector.baseline_fingerprint
-        ]
     except ArtifactDiffError as error:
         exit_for_error(error)
-    typer.echo(f"policy_sha256={policy_digest(checked)}")
-    typer.echo(f"clause_id={matching[0] if len(matching) == 1 else 'unresolved'}")
+    typer.echo(f"policy_sha256={checked.policy_sha256}")
+    typer.echo(f"clause_id={checked.resolved_clause_id}")
 
 
 @policy_app.command("seal")

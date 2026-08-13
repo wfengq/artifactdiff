@@ -30,7 +30,7 @@ class _PromptSecret:
     def get_secret(self, identity: str) -> bytes:
         if not sys.stdin.isatty():
             raise SignatureError("private-key passphrase requires an interactive terminal")
-        return typer.prompt(f"Passphrase for {identity}", hide_input=True).encode("utf-8")
+        return typer.prompt(f"Passphrase for {identity}", hide_input=True, err=True).encode("utf-8")
 
 
 def interactive_signer(

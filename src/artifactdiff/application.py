@@ -12,7 +12,15 @@ from artifactdiff.bundle import (
     verify_review_bundle,
     write_review_bundle,
 )
-from artifactdiff.contract import ClauseSelector, ContractDocument, inspect_contract, load_contract
+from artifactdiff.contract import (
+    ClauseSelector,
+    ContractDocument,
+    SelectorResolutionStatus,
+    inspect_contract,
+    load_contract,
+    resolve_baseline,
+)
+from artifactdiff.errors import PolicyValidationError
 from artifactdiff.evidence import pack_bundle
 from artifactdiff.fs_safety import PathPolicy
 from artifactdiff.normalize import sha256_file
@@ -21,6 +29,7 @@ from artifactdiff.policy import (
     draft_exact_replace_policy,
     freeze_policy,
     load_policy,
+    policy_digest,
     validate_policy,
     write_policy,
 )
@@ -45,6 +54,15 @@ from artifactdiff.verification.service import VerificationOptions, verify_contra
 
 
 @dataclass(frozen=True, slots=True)
+class PolicyValidationResult:
+    """One validated policy and the bounded selector result shared by adapters."""
+
+    policy: ContractPolicy
+    policy_sha256: str
+    resolved_clause_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactDiffApplication:
     """Thin, path-safe composition of the domain services for every adapter."""
 
@@ -57,6 +75,9 @@ class ArtifactDiffApplication:
 
     def _output(self, path: Path) -> Path:
         return self.path_policy.resolve_output(path) if self.path_policy else path
+
+    def _directory_input(self, path: Path) -> Path:
+        return self.path_policy.resolve_input_directory(path) if self.path_policy else path
 
     def _contract(self, path: Path) -> ContractDocument:
         source = self._input(path)
@@ -81,12 +102,23 @@ class ArtifactDiffApplication:
         )
 
     def write_policy(self, policy: ContractPolicy, output: Path) -> Path:
-        return write_policy(policy, self._output(output))
+        try:
+            return write_policy(policy, self._output(output))
+        except OSError:
+            raise PolicyValidationError("unable to write policy file") from None
 
-    def validate_policy(self, baseline: Path, policy_path: Path) -> ContractPolicy:
+    def validate_policy(self, baseline: Path, policy_path: Path) -> PolicyValidationResult:
         policy = load_policy(self._input(policy_path))
-        validate_policy(self._contract(baseline), policy)
-        return policy
+        contract = self._contract(baseline)
+        validate_policy(contract, policy)
+        resolution = resolve_baseline(contract, policy.expect[0].selector)
+        if resolution.status is not SelectorResolutionStatus.UNIQUE or len(resolution.matches) != 1:
+            raise PolicyValidationError("policy selector must resolve exactly once")
+        return PolicyValidationResult(
+            policy=policy,
+            policy_sha256=policy_digest(policy),
+            resolved_clause_id=resolution.matches[0].clause_id,
+        )
 
     def seal_policy(
         self,
@@ -96,8 +128,8 @@ class ArtifactDiffApplication:
         *,
         signer: SigningProvider | None = None,
     ) -> Path:
-        policy = self.validate_policy(baseline, policy_path)
-        frozen = freeze_policy(self._contract(baseline), policy)
+        validated = self.validate_policy(baseline, policy_path)
+        frozen = freeze_policy(self._contract(baseline), validated.policy)
         authorization = None
         if signer is not None:
             from artifactdiff.session import authorize_policy
@@ -145,12 +177,15 @@ class ArtifactDiffApplication:
     ) -> Path:
         from artifactdiff.errors import SessionError
 
+        checked_output = self._output(output)
+        verification_output = self._output(checked_output / "run")
         checked_baseline = self._input(baseline)
         checked_candidate = self._input(candidate)
         artifact = load_sealed_policy(self._input(sealed_policy))
-        checked_output = self._output(output)
         session = (
-            load_edit_session(session_path, trust_store=self.trust_store) if session_path else None
+            load_edit_session(self._directory_input(session_path), trust_store=self.trust_store)
+            if session_path
+            else None
         )
         if artifact.authorization is not None and session is None:
             raise SessionError("verified policy verification requires --session")
@@ -162,7 +197,7 @@ class ArtifactDiffApplication:
             checked_baseline,
             checked_candidate,
             artifact.frozen,
-            checked_output / "run",
+            verification_output,
             options=options,
         )
         assurance = (
@@ -185,7 +220,7 @@ class ArtifactDiffApplication:
         return load_sealed_policy(self._input(sealed_policy)).authorization is not None
 
     def list_findings(self, bundle: Path) -> list[Finding]:
-        return list_findings(self._input(bundle))
+        return list_findings(self._directory_input(bundle))
 
     def get_finding(self, bundle: Path, finding_id: str) -> Finding:
         findings = [item for item in self.list_findings(bundle) if item.id == finding_id]
@@ -199,15 +234,19 @@ class ArtifactDiffApplication:
         self, bundle: Path, finding_id: str, reason: str, *, signer: SigningProvider
     ) -> object:
         return approve_finding(
-            self._input(bundle), finding_id, reason, signer=signer, trust_store=self.trust_store
+            self._directory_input(bundle),
+            finding_id,
+            reason,
+            signer=signer,
+            trust_store=self.trust_store,
         )
 
     def verify_bundle(self, bundle: Path) -> BundleVerification:
-        return verify_review_bundle(self._input(bundle), trust_store=self.trust_store)
+        return verify_review_bundle(self._directory_input(bundle), trust_store=self.trust_store)
 
     def effective_verdict(self, bundle: Path) -> EffectiveVerdict:
         """Load the fail-closed verdict after independently verifying the bundle."""
-        return load_effective_verdict(self._input(bundle), trust_store=self.trust_store)
+        return load_effective_verdict(self._directory_input(bundle), trust_store=self.trust_store)
 
     def pack_bundle(
         self,
@@ -219,7 +258,7 @@ class ArtifactDiffApplication:
         archive_signer: SigningProvider | None = None,
     ) -> Path:
         return pack_bundle(
-            self._input(bundle),
+            self._directory_input(bundle),
             self._output(output),
             mode=mode,
             recipients=recipients,

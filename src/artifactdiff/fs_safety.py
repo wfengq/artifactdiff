@@ -61,15 +61,26 @@ class PathPolicy:
 
     def resolve_input(self, path: Path) -> Path:
         """Resolve an existing input and reject any root escape."""
+        resolved = self._resolve_existing_input(path)
+        if not resolved.is_file():
+            raise PathSafetyError("input path is outside configured roots")
+        return resolved
+
+    def resolve_input_directory(self, path: Path) -> Path:
+        """Resolve an existing directory input and reject any root escape."""
+        resolved = self._resolve_existing_input(path)
+        if not resolved.is_dir():
+            raise PathSafetyError("input directory is outside configured roots")
+        return resolved
+
+    def _resolve_existing_input(self, path: Path) -> Path:
         for root in self.input_roots:
             self._recheck_root(root)
         try:
             resolved = path.expanduser().resolve(strict=True)
         except OSError:
             raise PathSafetyError("input path is unavailable") from None
-        if not resolved.is_file() or not any(
-            _contains(root, resolved) for root in self.input_roots
-        ):
+        if not any(_contains(root, resolved) for root in self.input_roots):
             raise PathSafetyError("input path is outside configured roots")
         return resolved
 
