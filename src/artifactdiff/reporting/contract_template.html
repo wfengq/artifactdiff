@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ArtifactDiff Contract Review</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #162033; background: #f4f6fa; }
+    * { box-sizing: border-box; } body { margin: 0; } header, main { max-width: 1100px; margin: auto; padding: 1.25rem; }
+    header { color: white; background: #183451; border-radius: 0 0 1rem 1rem; }
+    h1 { margin: 0; } h2 { margin-top: 0; } section, article { margin: 1rem 0; padding: 1rem; background: white; border: 1px solid #d7deea; border-radius: .7rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .75rem; }
+    .badge { display: inline-block; padding: .25rem .6rem; border-radius: 2rem; background: #d9f3e5; color: #135b35; font-weight: 800; }
+    .warning { border-color: #d99c1d; background: #fff6da; } code, dd { overflow-wrap: anywhere; } dt { font-weight: 700; margin-top: .5rem; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f6f7f9; padding: .7rem; }
+    img { display: block; max-width: 100%; height: auto; border: 1px solid #ccd4e0; }
+    table { width: 100%; border-collapse: collapse; } th, td { text-align: left; vertical-align: top; padding: .5rem; border-bottom: 1px solid #d7deea; overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>ArtifactDiff Contract Review</h1>
+    <p class="badge">{{ manifest.assurance.value|upper }}</p>
+    <p>Read-only portable report · Evidence mode {{ evidence_mode }}</p>
+  </header>
+  <main>
+    <section aria-labelledby="verdict-heading">
+      <h2 id="verdict-heading">Verdict</h2>
+      <div class="grid">
+        <p><strong>Raw verdict</strong><br>{{ raw_verdict|upper }}</p>
+        <p><strong>Effective verdict</strong><br>{{ effective_verdict.outcome|upper }}</p>
+        <p><strong>Signature valid at creation</strong><br>{{ verification.signature_valid_at_creation }}</p>
+        <p><strong>Currently trusted</strong><br>{{ verification.currently_trusted }}</p>
+        <p><strong>Event chain valid</strong><br>{{ verification.event_chain_valid }}</p>
+      </div>
+    </section>
+    <section aria-labelledby="sources-heading">
+      <h2 id="sources-heading">Source digests</h2>
+      <dl><dt>Baseline SHA-256</dt><dd><code>{{ manifest.baseline_sha256 }}</code></dd><dt>Candidate SHA-256</dt><dd><code>{{ manifest.candidate_sha256 }}</code></dd><dt>Manifest SHA-256</dt><dd><code>{{ manifest_sha256 }}</code></dd></dl>
+    </section>
+    <section aria-labelledby="policy-heading">
+      <h2 id="policy-heading">Policy summary</h2>
+      <p>{{ policy.profile }} {{ policy.profile_version }} · <code>{{ policy.canonical_sha256 }}</code></p>
+      {% for rule in policy.expect %}<article><h3>{{ rule.id }}</h3><p>{{ rule.selector.clause_label }} · {{ rule.selector.heading }} · occurrence {{ rule.selector.occurrences }}</p><p><strong>Before</strong></p><pre>{{ rule.operation.before }}</pre><p><strong>After</strong></p><pre>{{ rule.operation.after }}</pre></article>{% endfor %}
+      <h3>Protected targets</h3><p>{{ policy.protect|join(", ") }}</p>
+      <h3>Relaxations from contract-safe</h3>
+      {% if policy.relaxations %}<ul>{% for item in policy.relaxations %}<li>{{ item.field }}: {{ item.contract_safe }} → {{ item.selected }}</li>{% endfor %}</ul>{% else %}<p>None.</p>{% endif %}
+    </section>
+    <section aria-labelledby="findings-heading">
+      <h2 id="findings-heading">Findings</h2>
+      {% for finding in findings %}<article><h3>{{ finding.id }} · {{ finding.outcome|upper }}</h3><p>{{ finding.rule_id }} · {{ finding.location }}</p>{% if finding.evidence.before_excerpt is not none %}<p><strong>Before excerpt</strong></p><pre>{{ finding.evidence.before_excerpt }}</pre>{% endif %}{% if finding.evidence.after_excerpt is not none %}<p><strong>After excerpt</strong></p><pre>{{ finding.evidence.after_excerpt }}</pre>{% endif %}<p><strong>Remediation</strong> {{ finding.remediation }}</p></article>{% else %}<p>No findings.</p>{% endfor %}
+    </section>
+    <section aria-labelledby="evidence-heading">
+      <h2 id="evidence-heading">Authorized evidence</h2>
+      {% if visual_unavailable %}<p class="warning" role="alert">Visual evidence is unavailable. Review the semantic findings and the policy's visual-unavailable rule.</p>{% endif %}
+      {% for excerpt in excerpts %}<article><h3>{{ excerpt.path }}</h3><pre>{{ excerpt.text }}</pre></article>{% endfor %}
+      {% for image in images %}<figure><figcaption>{{ image.kind }} · {{ image.path }}</figcaption><img data-evidence-kind="{{ image.kind }}" src="{{ image.data_url }}" alt="Authorized {{ image.kind }} evidence"></figure>{% endfor %}
+    </section>
+    <section aria-labelledby="signatures-heading"><h2 id="signatures-heading">Signatures and trust</h2>{% if signatures %}<table><thead><tr><th>Artifact</th><th>Identity</th><th>Purpose</th><th>Fingerprint</th><th>Claimed time</th></tr></thead><tbody>{% for signature in signatures %}<tr><td>{{ signature.label }}</td><td>{{ signature.identity }}</td><td>{{ signature.purpose }}</td><td><code>{{ signature.fingerprint }}</code></td><td>{{ signature.claimed_signing_time or "Not claimed" }}</td></tr>{% endfor %}</tbody></table>{% else %}<p>No signatures: local assurance.</p>{% endif %}</section>
+    <section aria-labelledby="history-heading"><h2 id="history-heading">Approval history</h2>{% for event in history %}<article><h3>Event {{ event.sequence }} · {{ event.event_type }}</h3><p>Identity: {{ event.identity }}</p>{% if event.finding_id is defined %}<p>Finding: {{ event.finding_id }} · {{ event.decision }}</p><p>Reason: {{ event.reason }}</p>{% endif %}</article>{% else %}<p>No signed events.</p>{% endfor %}</section>
+  </main>
+</body>
+</html>

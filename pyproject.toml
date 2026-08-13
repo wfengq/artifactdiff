@@ -33,6 +33,7 @@ packages = ["src/artifactdiff"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/artifactdiff/reporting/template.html" = "artifactdiff/reporting/template.html"
+"src/artifactdiff/reporting/contract_template.html" = "artifactdiff/reporting/contract_template.html"
 "src/artifactdiff/review_web/assets/index.html" = "artifactdiff/review_web/assets/index.html"
 "src/artifactdiff/review_web/assets/app.js" = "artifactdiff/review_web/assets/app.js"
 "src/artifactdiff/review_web/assets/styles.css" = "artifactdiff/review_web/assets/styles.css"
