@@ -391,6 +391,8 @@ def test_contract_report_is_offline_escaped_and_assurance_visible(tmp_path: Path
 
 Use a strict Jinja environment with autoescape. Embed only evidence already authorized by the bundle's mode as Base64 data URLs. Render source digests, policy summary, relaxations, findings, semantic excerpts, available crops/pages, raw/effective verdict, assurance, signatures, trust-at-creation/current-trust status, and approval event history. The report is read-only and contains no signing or approval function.
 
+The output parent is an explicit trust boundary: it must be a private directory controlled by the current user. Write a hidden staging file in that directory, flush and verify it completely, then atomically hard-link it to a must-be-new final name. This guarantee is portable across Windows, macOS, and Linux; mutation by another same-privilege writer with access to that trusted directory is outside the contract.
+
 - [ ] **Step 3: Test deterministic HTML and partial evidence**
 
 Run: `python -m pytest tests/integration/reporting/test_contract_html.py tests/integration/test_html_report.py -q`

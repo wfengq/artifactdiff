@@ -166,6 +166,7 @@ MCP responses do not embed page images or the complete HTML report in model cont
 - The LibreOffice process is started with an argument list and no command shell.
 - Each conversion uses an isolated temporary directory and profile.
 - Temporary files are removed after report creation, including on handled failures.
+- A report output parent is a trust boundary and must be a private directory controlled by the current user. Report publication is atomic and never overwrites an existing final name, but it does not attempt to defend against another same-privilege process that can mutate that directory during or after publication.
 - Files larger than 100 MB or documents over 500 pages are rejected unless `--force` is present.
 - Encrypted, corrupt, unsupported, or mismatched input formats produce actionable validation errors.
 

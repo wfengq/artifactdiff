@@ -8,6 +8,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import mkstemp
 from typing import Any
 
 from jinja2 import Environment, PackageLoader, StrictUndefined, select_autoescape
@@ -495,8 +496,32 @@ def _policy_summary(frozen: FrozenPolicy) -> dict[str, object]:
     }
 
 
+def _link_staging_to_final(staging: Path, final: Path) -> None:
+    """Atomically publish a complete staging file without replacing ``final``."""
+    os.link(staging, final, follow_symlinks=False)
+
+
+def _descriptor_sha256(descriptor: int) -> bytes:
+    offset = os.lseek(descriptor, 0, os.SEEK_CUR)
+    digest = hashlib.sha256()
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+    finally:
+        os.lseek(descriptor, offset, os.SEEK_SET)
+    return digest.digest()
+
+
+def _remove_renderer_path(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) -> Path:
-    """Render a verified Review Bundle as one deterministic, offline, read-only HTML file."""
+    """Render a verified bundle to a new file in a trusted, private output parent."""
     captured, verification, effective = _capture(bundle, trust_store)
     environment = Environment(
         loader=PackageLoader("artifactdiff", "reporting"),
@@ -521,7 +546,9 @@ def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) 
     descriptor: int | None = None
     owned_identity: tuple[int, int] | None = None
     published = False
+    linked_final = False
     final: Path | None = None
+    staging: Path | None = None
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
         parent = output.parent.resolve(strict=True)
@@ -531,8 +558,8 @@ def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) 
         final = parent / output.name
         if final.is_symlink() or final.exists():
             raise BundleError("contract report output must be new")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        descriptor = os.open(final, flags, 0o600)
+        descriptor, staging_name = mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=parent)
+        staging = Path(staging_name)
         opened = os.fstat(descriptor)
         owned_identity = (opened.st_dev, opened.st_ino)
         contents = rendered.encode("utf-8")
@@ -550,19 +577,30 @@ def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) 
         ) or output.parent.resolve(strict=True) != parent:
             raise BundleError("contract report output parent changed")
         descriptor_status = os.fstat(descriptor)
-        path_status = final.stat(follow_symlinks=False)
         if (
-            final.is_symlink()
-            or (path_status.st_dev, path_status.st_ino) != owned_identity
-            or (descriptor_status.st_dev, descriptor_status.st_ino) != owned_identity
-            or descriptor_status.st_size != len(contents)
-            or path_status.st_size != len(contents)
-        ):
+            descriptor_status.st_dev,
+            descriptor_status.st_ino,
+        ) != owned_identity or descriptor_status.st_size != len(contents):
             raise BundleError("contract report output publication failed")
-        if hashlib.sha256(final.read_bytes()).digest() != hashlib.sha256(contents).digest():
+        if _descriptor_sha256(descriptor) != hashlib.sha256(contents).digest():
             raise BundleError("contract report output publication failed")
+        try:
+            _link_staging_to_final(staging, final)
+        except FileExistsError:
+            raise BundleError("contract report output must be new") from None
+        linked_final = True
+        current_parent = parent.stat()
+        if (current_parent.st_dev, current_parent.st_ino) != (
+            parent_status.st_dev,
+            parent_status.st_ino,
+        ) or output.parent.resolve(strict=True) != parent:
+            raise BundleError("contract report output parent changed")
         final_status = final.stat(follow_symlinks=False)
-        if (final_status.st_dev, final_status.st_ino) != owned_identity:
+        if (
+            stat.S_ISLNK(final_status.st_mode)
+            or (final_status.st_dev, final_status.st_ino) != owned_identity
+            or final_status.st_size != len(contents)
+        ):
             raise BundleError("contract report output publication failed")
         published = True
         return final
@@ -574,16 +612,11 @@ def write_contract_html(bundle: Path, output: Path, *, trust_store: TrustStore) 
         raise BundleError("contract report output publication failed") from None
     finally:
         if descriptor is not None:
-            os.close(descriptor)
-        if not published and final is not None and owned_identity is not None:
             try:
-                status = final.stat(follow_symlinks=False)
-                if (
-                    not final.is_symlink()
-                    and (status.st_dev, status.st_ino) == owned_identity
-                    and hashlib.sha256(final.read_bytes()).digest()
-                    == hashlib.sha256(contents).digest()
-                ):
-                    final.unlink()
+                os.close(descriptor)
             except OSError:
                 pass
+        if not published and linked_final and final is not None:
+            _remove_renderer_path(final)
+        if staging is not None:
+            _remove_renderer_path(staging)

@@ -391,19 +391,38 @@ def test_contract_report_rejects_policy_evidence_mode_mismatch_before_embedding(
     assert evidence_read is False
 
 
+def test_contract_report_publication_links_staging_without_platform_specific_fd_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from artifactdiff.reporting import contract_html
+
+    staging = tmp_path / ".review.html.staging.tmp"
+    final = tmp_path / "review.html"
+    calls: list[tuple[Path, Path]] = []
+
+    def record_link(source: Path, destination: Path, **kwargs: object) -> None:
+        calls.append((source, destination))
+
+    monkeypatch.setattr(contract_html.os, "link", record_link)
+    contract_html._link_staging_to_final(staging, final)
+
+    assert calls == [(staging, final)]
+
+
 def test_contract_report_never_overwrites_a_concurrently_created_output(
     bundle_fixture: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from artifactdiff.reporting import contract_html
+
     bundle = _bundle(bundle_fixture)
     output = tmp_path / "review.html"
-    original = os.open
+    original = contract_html._link_staging_to_final
 
-    def race(path: object, flags: int, mode: int = 0o777) -> int:
-        if Path(path) == output:
-            output.write_bytes(b"concurrent creator")
-        return original(path, flags, mode)
+    def race(staging: Path, final: Path) -> None:
+        output.write_bytes(b"concurrent creator")
+        original(staging, final)
 
-    monkeypatch.setattr(os, "open", race)
+    monkeypatch.setattr(contract_html, "_link_staging_to_final", race)
 
     with pytest.raises(BundleError, match="output"):
         write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
@@ -509,65 +528,86 @@ def test_contract_report_rejects_manifest_signature_aba_snapshot(
         write_contract_html(bundle, tmp_path / "review.html", trust_store=trust_store)
 
 
-@pytest.mark.parametrize("replacement", ["same_size", "different_size"])
-def test_contract_report_never_returns_or_deletes_concurrent_replacement(
-    bundle_fixture: object,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    replacement: str,
+def test_contract_report_final_path_is_absent_during_partial_staging_write(
+    bundle_fixture: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from artifactdiff.reporting import contract_html
 
     bundle = _bundle(bundle_fixture)
     output = tmp_path / "review.html"
-    original_fsync = os.fsync
-    original_stat = Path.stat
-    replacement_visible = False
+    original_write = os.write
+    observed = False
 
-    def replace_after_write(descriptor: int) -> None:
-        nonlocal replacement_visible
-        original_fsync(descriptor)
-        replacement_visible = True
+    def partial(descriptor: int, contents: bytes) -> int:
+        nonlocal observed
+        observed = True
+        assert not output.exists()
+        return original_write(descriptor, contents[: max(1, len(contents) // 2)])
 
-    def replacement_stat(path: Path, *args: object, **kwargs: object) -> os.stat_result:
-        result = original_stat(path, *args, **kwargs)
-        if path == output and replacement_visible:
-            values = list(result)
-            values[1] = result.st_ino + 1
-            if replacement == "different_size":
-                values[6] = result.st_size + 1
-            return os.stat_result(values)
-        return result
+    monkeypatch.setattr(contract_html.os, "write", partial)
+    write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
+    assert observed and output.read_bytes().startswith(b"<!doctype html>")
 
-    monkeypatch.setattr(contract_html.os, "fsync", replace_after_write)
-    monkeypatch.setattr(Path, "stat", replacement_stat)
+
+@pytest.mark.parametrize("failure", ["write", "fsync"])
+def test_contract_report_staging_failure_leaves_no_final_or_staging(
+    bundle_fixture: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    from artifactdiff.reporting import contract_html
+
+    bundle = _bundle(bundle_fixture)
+    output = tmp_path / "review.html"
+
+    def fail(*args: object, **kwargs: object) -> object:
+        raise OSError(f"{failure} failed")
+
+    monkeypatch.setattr(contract_html.os, failure, fail)
     with pytest.raises(BundleError, match="output"):
         write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
-    assert output.exists()
-    assert output.read_bytes().startswith(b"<!doctype html>")
+    assert not output.exists()
+    assert not list(tmp_path.glob(".review.html.*.tmp"))
 
 
-def test_contract_report_rejects_parent_swap_without_publishing_outside_anchor(
-    bundle_fixture: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_contract_report_success_publishes_complete_atomic_report(
+    bundle_fixture: object, tmp_path: Path
 ) -> None:
     bundle = _bundle(bundle_fixture)
-    parent = tmp_path / "reports"
-    parent.mkdir()
-    alternate = tmp_path / "reports-swapped"
-    alternate.mkdir()
-    output = parent / "review.html"
-    original_resolve = Path.resolve
-    parent_resolves = 0
+    output = write_contract_html(
+        bundle, tmp_path / "review.html", trust_store=bundle_fixture.trust_store
+    )
+    contents = output.read_bytes()
+    assert contents.startswith(b"<!doctype html>")
+    assert contents.rstrip().endswith(b"</html>")
+    assert not list(tmp_path.glob(".review.html.*.tmp"))
 
-    def swap_parent(path: Path, *args: object, **kwargs: object) -> Path:
-        nonlocal parent_resolves
-        if path == parent:
-            parent_resolves += 1
-            if parent_resolves > 1:
-                return alternate
-        return original_resolve(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "resolve", swap_parent)
-    with pytest.raises(BundleError, match="output|parent"):
-        write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
-    assert not (parent / "review.html").exists()
+def test_contract_report_close_failure_still_cleans_renderer_owned_paths(
+    bundle_fixture: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from artifactdiff.reporting import contract_html
+
+    bundle = _bundle(bundle_fixture)
+    output = tmp_path / "review.html"
+    original_close = os.close
+    original_mkstemp = contract_html.mkstemp
+    output_descriptor: int | None = None
+
+    def capture_descriptor(*args: object, **kwargs: object) -> tuple[int, str]:
+        nonlocal output_descriptor
+        descriptor, name = original_mkstemp(*args, **kwargs)
+        output_descriptor = descriptor
+        return descriptor, name
+
+    def close_then_fail(descriptor: int) -> None:
+        original_close(descriptor)
+        if descriptor == output_descriptor:
+            raise OSError("close failed")
+
+    monkeypatch.setattr(contract_html, "mkstemp", capture_descriptor)
+    monkeypatch.setattr(contract_html.os, "close", close_then_fail)
+    report = write_contract_html(bundle, output, trust_store=bundle_fixture.trust_store)
+    assert report.read_bytes().startswith(b"<!doctype html>")
+    assert not list(tmp_path.glob(".review.html.*.tmp"))
