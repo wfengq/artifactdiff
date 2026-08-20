@@ -11,6 +11,7 @@ from artifactdiff.fs_safety import PathPolicy
 
 _INPUT_ROOTS = "ARTIFACTDIFF_MCP_INPUT_ROOTS"
 _OUTPUT_ROOTS = "ARTIFACTDIFF_MCP_OUTPUT_ROOTS"
+_TRUST_STORE = "ARTIFACTDIFF_MCP_TRUST_STORE"
 
 
 def _read_roots(variable: str) -> tuple[Path, ...]:
@@ -24,6 +25,17 @@ def _read_roots(variable: str) -> tuple[Path, ...]:
     if any(not root.is_absolute() for root in roots):
         raise PathSafetyError(f"{variable} must contain only absolute paths")
     return roots
+
+
+def trust_store_path_from_environment() -> Path | None:
+    """Read one absolute trust-store path without touching the filesystem."""
+    value = os.environ.get(_TRUST_STORE)
+    if value is None:
+        return None
+    path = Path(value)
+    if not path.is_absolute():
+        raise PathSafetyError(f"{_TRUST_STORE} must contain an absolute path")
+    return path
 
 
 @dataclass(frozen=True, slots=True)

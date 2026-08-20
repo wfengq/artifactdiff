@@ -11,7 +11,7 @@ import typer
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.cli_support import exit_for_error, interactive_signer, trust_store_from
 from artifactdiff.contract import ClauseSelector
-from artifactdiff.errors import ArtifactDiffError, PolicyValidationError
+from artifactdiff.errors import ArtifactDiffError, PolicyValidationError, ReviewServerError
 
 policy_app = typer.Typer(no_args_is_help=True)
 
@@ -74,20 +74,26 @@ def create(
                 else None
             )
 
-            server = review_server.serve_review(
-                ReviewContext(
-                    application,
-                    "policy",
-                    baseline,
-                    signing_provider,
-                    output_path=output,
-                ),
-                open_browser=True,
-            )
             try:
-                server.thread.join()
-            finally:
-                server.shutdown()
+                server = review_server.serve_review(
+                    ReviewContext(
+                        application,
+                        "policy",
+                        baseline,
+                        signing_provider,
+                        output_path=output,
+                        force_output=force_output,
+                    ),
+                    open_browser=True,
+                )
+                try:
+                    server.thread.join()
+                finally:
+                    server.shutdown()
+            except ArtifactDiffError:
+                raise
+            except (OSError, RuntimeError):
+                raise ReviewServerError("local review server operation failed") from None
             if not output.is_file():
                 raise PolicyValidationError("policy wizard closed without sealing an artifact")
             typer.echo(str(output.resolve()))
@@ -103,7 +109,7 @@ def create(
             before=_required(before, "before"),
             after=_required(after, "after"),
         )
-        application.write_policy(policy, output)
+        application.write_policy(policy, output, overwrite=force_output)
     except ArtifactDiffError as error:
         exit_for_error(error)
     typer.echo(str(output.resolve()))

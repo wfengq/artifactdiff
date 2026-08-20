@@ -14,7 +14,7 @@ from artifactdiff.cli_support import (
     interactive_signer,
     trust_store_from,
 )
-from artifactdiff.errors import ApprovalError, ArtifactDiffError, SessionError
+from artifactdiff.errors import ApprovalError, ArtifactDiffError, ReviewServerError, SessionError
 from artifactdiff.verification import FindingOutcome
 from artifactdiff.verification.service import VerificationOptions
 
@@ -104,14 +104,19 @@ def review(
         from artifactdiff.review_web import server as review_server
         from artifactdiff.review_web.app import ReviewContext
 
-        server = review_server.serve_review(
-            ReviewContext(application, "bundle", bundle, signing_provider),
-            open_browser=not no_open,
-        )
         try:
-            server.thread.join()
-        finally:
-            server.shutdown()
+            server = review_server.serve_review(
+                ReviewContext(application, "bundle", bundle, signing_provider),
+                open_browser=not no_open,
+            )
+            try:
+                server.thread.join()
+            finally:
+                server.shutdown()
+        except ArtifactDiffError:
+            raise
+        except (OSError, RuntimeError):
+            raise ReviewServerError("local review server operation failed") from None
     except ArtifactDiffError as error:
         exit_for_error(error)
 

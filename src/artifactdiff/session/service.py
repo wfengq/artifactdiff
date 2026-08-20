@@ -143,7 +143,9 @@ def _write_canonical(path: Path, value: BaseModel) -> None:
         raise SessionError("unable to write session artifact") from None
 
 
-def write_sealed_policy(artifact: SealedPolicyArtifact, path: Path) -> Path:
+def write_sealed_policy(
+    artifact: SealedPolicyArtifact, path: Path, *, overwrite: bool = True
+) -> Path:
     """Atomically write frozen policy and optional authorization without assurance."""
     checked = _checked_sealed(artifact)
     if path.suffix.casefold() != ".json":
@@ -168,7 +170,10 @@ def write_sealed_policy(artifact: SealedPolicyArtifact, path: Path) -> Path:
                 os.fsync(stream.fileno())
             except OSError:
                 pass
-        temporary.replace(path)
+        if overwrite:
+            temporary.replace(path)
+        else:
+            os.link(temporary, path, follow_symlinks=False)
     except OSError:
         raise SessionError("unable to write sealed policy artifact") from None
     finally:

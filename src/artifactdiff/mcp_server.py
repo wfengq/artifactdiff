@@ -23,9 +23,11 @@ from artifactdiff.errors import (
     BundleError,
     InputValidationError,
     PathSafetyError,
+    SignatureError,
 )
+from artifactdiff.fs_safety import PathPolicy
 from artifactdiff.limits import validate_source
-from artifactdiff.mcp_paths import McpRoots
+from artifactdiff.mcp_paths import McpRoots, trust_store_path_from_environment
 from artifactdiff.models import BlockRef, SourceDescriptor
 from artifactdiff.policy import policy_digest
 from artifactdiff.service import CompareOptions, ComparisonRun, compare_documents, inspect_document
@@ -44,6 +46,7 @@ _MAX_ANCESTOR_ITEM = 256
 _MAX_POLICY_REPLACEMENT = 4_000
 _MAX_RULE_ID = 64
 _MAX_POLICY_BYTES = 16_384
+_MAX_TRUST_STORE_BYTES = 1024 * 1024
 
 
 def _error_response(error: ArtifactDiffError) -> dict[str, object]:
@@ -293,12 +296,40 @@ def _lexical_absolute(path: Path) -> Path:
     return Path(os.path.abspath(path.expanduser()))
 
 
-def create_mcp(roots: McpRoots | None = None) -> FastMCP:
+def _environment_trust_store(policy: PathPolicy) -> TrustStore:
+    try:
+        path = trust_store_path_from_environment()
+        if path is None:
+            return TrustStore(identities=[])
+        resolved = policy.resolve_input(path)
+        if resolved.stat().st_size > _MAX_TRUST_STORE_BYTES:
+            raise SignatureError("invalid MCP trust store configuration")
+        with resolved.open("rb") as stream:
+            raw = stream.read(_MAX_TRUST_STORE_BYTES + 1)
+        if len(raw) > _MAX_TRUST_STORE_BYTES:
+            raise SignatureError("invalid MCP trust store configuration")
+        return TrustStore.model_validate_json(raw)
+    except (ArtifactDiffError, OSError, OverflowError, RecursionError, TypeError, ValueError):
+        raise SignatureError("invalid MCP trust store configuration") from None
+
+
+def create_mcp(roots: McpRoots | None = None, *, trust_store: TrustStore | None = None) -> FastMCP:
     """Create one MCP server whose file access is constrained to *roots*."""
     configured_roots = roots if roots is not None else McpRoots.from_environment()
     policy = configured_roots.path_policy() if configured_roots.enabled else None
+    trust_configuration_error: SignatureError | None = None
+    configured_trust_store = TrustStore(identities=[])
+    if policy is not None:
+        try:
+            configured_trust_store = (
+                TrustStore.model_validate(trust_store)
+                if trust_store is not None
+                else _environment_trust_store(policy)
+            )
+        except (SignatureError, OverflowError, RecursionError, TypeError, ValueError):
+            trust_configuration_error = SignatureError("invalid MCP trust store configuration")
     application = (
-        ArtifactDiffApplication(trust_store=TrustStore(identities=[]), path_policy=policy)
+        ArtifactDiffApplication(trust_store=configured_trust_store, path_policy=policy)
         if policy is not None
         else None
     )
@@ -526,6 +557,8 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
     @server.tool(name="verify_review_bundle")
     @_with_error_boundary
     async def verify_review_bundle_tool(bundle_path: str) -> dict[str, object]:
+        if trust_configuration_error is not None:
+            raise trust_configuration_error
         app = require_application()
         snapshot = require_generated().review_bundle(Path(bundle_path))
         verification = (
@@ -533,12 +566,10 @@ def create_mcp(roots: McpRoots | None = None) -> FastMCP:
         )
         if not verification.valid:
             raise BundleError("review bundle verification failed")
-        if verification.currently_trusted is False:
-            raise BundleError("review bundle trust is no longer valid")
         effective = (
             snapshot.effective_verdict
             if snapshot is not None
-            else app.effective_verdict(Path(bundle_path))
+            else app.effective_verdict(Path(bundle_path), require_current_trust=False)
         )
         return {
             "ok": True,

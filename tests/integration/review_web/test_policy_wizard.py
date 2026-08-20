@@ -205,6 +205,64 @@ def test_local_seal_returns_only_the_public_sealed_artifact(tmp_path: Path) -> N
     )
 
 
+def test_wizard_seal_without_force_preserves_a_concurrent_creator(tmp_path: Path) -> None:
+    """A file created during a long-lived wizard session must remain byte-for-byte intact."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "sealed-policy.json"
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    app = create_review_app(
+        ReviewContext(application, "policy", baseline, None, output), SESSION_TOKEN, CSRF_TOKEN
+    )
+    app.state.bound_host = "127.0.0.1:8765"
+    client = AsgiClient(app, base_url=BASE_URL)
+    assert (
+        client.post("/api/session", headers={"X-ArtifactDiff-Session": SESSION_TOKEN}).status_code
+        == 200
+    )
+    assert client.post("/api/policy", headers=_headers(), json=_payload()).status_code == 200
+    concurrent = b"concurrent wizard creator owns these bytes"
+    output.write_bytes(concurrent)
+
+    sealed = client.post(
+        "/api/policy/seal",
+        headers=_headers(),
+        json={"assurance": "local"},
+    )
+
+    assert sealed.status_code == 422
+    assert output.read_bytes() == concurrent
+
+
+def test_wizard_seal_with_force_replaces_a_concurrent_creator(tmp_path: Path) -> None:
+    """The wizard may replace a late creator only when the CLI explicitly enabled force."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "sealed-policy.json"
+    application = ArtifactDiffApplication(trust_store=TrustStore(identities=[]))
+    app = create_review_app(
+        ReviewContext(application, "policy", baseline, None, output, force_output=True),
+        SESSION_TOKEN,
+        CSRF_TOKEN,
+    )
+    app.state.bound_host = "127.0.0.1:8765"
+    client = AsgiClient(app, base_url=BASE_URL)
+    assert (
+        client.post("/api/session", headers={"X-ArtifactDiff-Session": SESSION_TOKEN}).status_code
+        == 200
+    )
+    assert client.post("/api/policy", headers=_headers(), json=_payload()).status_code == 200
+    concurrent = b"replaceable concurrent wizard creator"
+    output.write_bytes(concurrent)
+
+    sealed = client.post(
+        "/api/policy/seal",
+        headers=_headers(),
+        json={"assurance": "local"},
+    )
+
+    assert sealed.status_code == 200
+    assert output.read_bytes() != concurrent
+
+
 def test_verified_wizard_seal_durably_writes_an_authorized_artifact(tmp_path: Path) -> None:
     """A verified choice must produce a sealed artifact, not an unsigned draft."""
     baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
@@ -316,6 +374,42 @@ def test_interactive_policy_create_opens_wizard_unless_no_open_is_set(
     assert context.output_path == output
 
 
+def test_interactive_policy_create_carries_force_output_into_the_wizard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wizard publication boundary must receive the CLI overwrite decision."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "policy.json"
+    captured: list[object] = []
+
+    class Thread:
+        def join(self) -> None:
+            return None
+
+    class Server:
+        thread = Thread()
+
+        def shutdown(self) -> None:
+            return None
+
+    def serve(context: object, *, open_browser: bool) -> Server:
+        del open_browser
+        captured.append(context)
+        context.output_path.write_bytes(b"sealed")
+        return Server()
+
+    monkeypatch.setattr("typer.testing._NamedTextIOWrapper.isatty", lambda _self: True)
+    monkeypatch.setattr("artifactdiff.review_web.server.serve_review", serve)
+    result = CliRunner().invoke(
+        cli_app,
+        ["policy", "create", str(baseline), "--output", str(output), "--force-output"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(captured) == 1
+    assert captured[0].force_output is True
+
+
 def test_interactive_policy_create_fails_if_wizard_closes_without_sealing(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -342,6 +436,43 @@ def test_interactive_policy_create_fails_if_wizard_closes_without_sealing(
 
     assert result.exit_code == 2
     assert not output.exists()
+
+
+@pytest.mark.parametrize("stage", ["startup", "shutdown"])
+def test_policy_create_translates_review_server_operational_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    """Raw loopback failures must remain inside the public CLI error boundary."""
+    baseline = make_contract_docx(tmp_path / "baseline.docx", language="en", payment_days=30)
+    output = tmp_path / "policy.json"
+    secret = "private listener diagnostic"
+
+    class Thread:
+        def join(self) -> None:
+            return None
+
+    class Server:
+        thread = Thread()
+
+        def shutdown(self) -> None:
+            raise RuntimeError(secret)
+
+    def serve(*_args: object, **_kwargs: object) -> Server:
+        if stage == "startup":
+            raise OSError(secret)
+        return Server()
+
+    monkeypatch.setattr("typer.testing._NamedTextIOWrapper.isatty", lambda _self: True)
+    monkeypatch.setattr("artifactdiff.review_web.server.serve_review", serve)
+
+    result = CliRunner().invoke(
+        cli_app, ["policy", "create", str(baseline), "--output", str(output)]
+    )
+
+    assert result.exit_code == 2
+    assert "ArtifactDiff error: local review server operation failed" in result.output
+    assert secret not in result.output
+    assert "Traceback" not in result.output
 
 
 def test_interactive_policy_create_configures_verified_signing_provider(

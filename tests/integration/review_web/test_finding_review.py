@@ -246,6 +246,40 @@ def test_review_cli_starts_the_bundle_desk_with_no_open_for_automation(
     assert context.mode == "bundle" and context.target_path == bundle
 
 
+@pytest.mark.parametrize("stage", ["startup", "shutdown"])
+def test_review_cli_translates_review_server_operational_failures(
+    bundle_fixture: object, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    """The review adapter must expose loopback failures only as public exit two."""
+    finding = _finding(FindingOutcome.REVIEW, approvable=True, location="clause:failure")
+    bundle = _bundle(bundle_fixture, finding)
+    secret = "private uvicorn diagnostic"
+
+    class Thread:
+        def join(self) -> None:
+            return None
+
+    class Server:
+        thread = Thread()
+
+        def shutdown(self) -> None:
+            raise RuntimeError(secret)
+
+    def serve(*_args: object, **_kwargs: object) -> Server:
+        if stage == "startup":
+            raise OSError(secret)
+        return Server()
+
+    monkeypatch.setattr("artifactdiff.review_web.server.serve_review", serve)
+
+    result = CliRunner().invoke(cli_app, ["review", str(bundle), "--no-open"])
+
+    assert result.exit_code == 2
+    assert "ArtifactDiff error: local review server operation failed" in result.output
+    assert secret not in result.output
+    assert "Traceback" not in result.output
+
+
 def test_review_cli_accepts_a_trust_store_without_enabling_signing(
     bundle_fixture: object, tmp_path: Path, monkeypatch
 ) -> None:

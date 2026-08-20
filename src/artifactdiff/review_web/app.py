@@ -79,6 +79,7 @@ class ReviewContext:
     target_path: Path
     signing_provider: ReviewSigningProvider | None
     output_path: Path | None = None
+    force_output: bool = False
 
 
 @dataclass(slots=True)
@@ -147,6 +148,7 @@ def create_review_app(context: ReviewContext, session_token: str, csrf_token: st
         context.target_path,
         context.signing_provider,
         context.output_path,
+        context.force_output,
     )
 
     async def shell(_: Request) -> Response:

@@ -13,6 +13,7 @@ from typing import Literal
 
 import uvicorn
 
+from artifactdiff.errors import ArtifactDiffError, ReviewServerError
 from artifactdiff.review_web.app import ReviewContext, create_review_app
 
 _START_TIMEOUT_SECONDS = 5.0
@@ -96,13 +97,21 @@ class ReviewServer:
             if self._state == "closed":
                 return
             self._request_shutdown_locked()
-        self.thread.join(timeout=timeout_seconds)
-        if self.thread.is_alive():
-            raise RuntimeError("review server did not stop")
+        try:
+            self.thread.join(timeout=timeout_seconds)
+            if self.thread.is_alive():
+                raise ReviewServerError("local review server operation failed")
+        except ReviewServerError:
+            raise
+        except (OSError, RuntimeError):
+            raise ReviewServerError("local review server operation failed") from None
         with self._finalizer_lock:
             if self.closed:
                 return
-            self.socket.close()
+            try:
+                self.socket.close()
+            except OSError:
+                raise ReviewServerError("local review server operation failed") from None
             with self._lock:
                 self._state = "closed"
 
@@ -125,52 +134,82 @@ class ReviewServer:
 
 def serve_review(context: ReviewContext, *, open_browser: bool = True) -> ReviewServer:
     """Start the local review desk and return its fragment-token launch URL."""
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-    listener.bind(("127.0.0.1", 0))
-    listener.listen(socket.SOMAXCONN)
-    listener.setblocking(False)
-    host, port = listener.getsockname()
-    session_token = _new_token()
-    app = create_review_app(context, session_token=session_token, csrf_token=_new_token())
-    app.state.bound_host = f"{host}:{port}"
-    config = uvicorn.Config(
-        app,
-        access_log=False,
-        host="127.0.0.1",
-        log_level="warning",
-        proxy_headers=False,
-    )
-    uvicorn_server = uvicorn.Server(config)
-    holder: list[ReviewServer] = []
+    listener: socket.socket | None = None
+    review_server: ReviewServer | None = None
+    try:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(socket.SOMAXCONN)
+        listener.setblocking(False)
+        host, port = listener.getsockname()
+        session_token = _new_token()
+        app = create_review_app(context, session_token=session_token, csrf_token=_new_token())
+        app.state.bound_host = f"{host}:{port}"
+        config = uvicorn.Config(
+            app,
+            access_log=False,
+            host="127.0.0.1",
+            log_level="warning",
+            proxy_headers=False,
+        )
+        uvicorn_server = uvicorn.Server(config)
+        holder: list[ReviewServer] = []
 
-    def run_server() -> None:
+        def run_server() -> None:
+            try:
+                uvicorn_server.run(sockets=[listener])
+            finally:
+                holder[0].finalize_after_server_exit()
+
+        thread = threading.Thread(
+            target=run_server, name="artifactdiff-review-loopback", daemon=False
+        )
+        review_server = ReviewServer(
+            url=f"http://{host}:{port}/#token={session_token}",
+            socket=listener,
+            thread=thread,
+            _uvicorn=uvicorn_server,
+            _idle_timeout_seconds=_IDLE_TIMEOUT_SECONDS,
+        )
+        holder.append(review_server)
+        # A request handler runs on this very thread, so it may only request the
+        # Uvicorn loop to exit. The owner joins and closes the listener afterwards.
+        app.state.shutdown_callback = review_server.request_shutdown
+        app.state.activity_callback = review_server.reset_idle_timer
+        thread.start()
+        _wait_until_started(uvicorn_server, review_server)
+        review_server.reset_idle_timer()
+        if open_browser and not webbrowser.open(review_server.url):
+            raise ReviewServerError("local review server operation failed")
+        print(review_server.url, flush=True)
+        return review_server
+    except ArtifactDiffError:
+        _cleanup_failed_start(listener, review_server)
+        raise
+    except (OSError, RuntimeError, webbrowser.Error):
+        _cleanup_failed_start(listener, review_server)
+        raise ReviewServerError("local review server operation failed") from None
+    except Exception:
+        _cleanup_failed_start(listener, review_server)
+        raise
+
+
+def _cleanup_failed_start(
+    listener: socket.socket | None, review_server: ReviewServer | None
+) -> None:
+    if review_server is not None:
         try:
-            uvicorn_server.run(sockets=[listener])
-        finally:
-            holder[0].finalize_after_server_exit()
-
-    thread = threading.Thread(target=run_server, name="artifactdiff-review-loopback", daemon=False)
-    review_server = ReviewServer(
-        url=f"http://{host}:{port}/#token={session_token}",
-        socket=listener,
-        thread=thread,
-        _uvicorn=uvicorn_server,
-        _idle_timeout_seconds=_IDLE_TIMEOUT_SECONDS,
-    )
-    holder.append(review_server)
-    # A request handler runs on this very thread, so it may only request the
-    # Uvicorn loop to exit. The owner joins and closes the listener afterwards.
-    app.state.shutdown_callback = review_server.request_shutdown
-    app.state.activity_callback = review_server.reset_idle_timer
-    thread.start()
-    _wait_until_started(uvicorn_server, review_server)
-    review_server.reset_idle_timer()
-    print(review_server.url, flush=True)
-    if open_browser:
-        webbrowser.open(review_server.url)
-    return review_server
+            review_server.shutdown()
+        except ArtifactDiffError:
+            pass
+    if listener is None:
+        return
+    try:
+        listener.close()
+    except OSError:
+        pass
 
 
 def _new_token() -> str:
@@ -181,9 +220,8 @@ def _wait_until_started(server: uvicorn.Server, review_server: ReviewServer) -> 
     deadline = time.monotonic() + _START_TIMEOUT_SECONDS
     while not server.started:
         if not review_server.thread.is_alive():
-            review_server.socket.close()
-            raise RuntimeError("review server failed to start")
+            raise ReviewServerError("local review server operation failed")
         if time.monotonic() >= deadline:
             review_server.shutdown()
-            raise RuntimeError("review server did not start")
+            raise ReviewServerError("local review server operation failed")
         time.sleep(0.01)

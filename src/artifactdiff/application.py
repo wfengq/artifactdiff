@@ -122,9 +122,9 @@ class ArtifactDiffApplication:
             self._contract(baseline), selector, before=before, after=after, rule_id=rule_id
         )
 
-    def write_policy(self, policy: ContractPolicy, output: Path) -> Path:
+    def write_policy(self, policy: ContractPolicy, output: Path, *, overwrite: bool = True) -> Path:
         try:
-            return write_policy(policy, self._output(output))
+            return write_policy(policy, self._output(output), overwrite=overwrite)
         except OSError:
             raise PolicyValidationError("unable to write policy file") from None
 
@@ -338,9 +338,15 @@ class ArtifactDiffApplication:
     def verify_bundle(self, bundle: Path) -> BundleVerification:
         return verify_review_bundle(self._directory_input(bundle), trust_store=self.trust_store)
 
-    def effective_verdict(self, bundle: Path) -> EffectiveVerdict:
+    def effective_verdict(
+        self, bundle: Path, *, require_current_trust: bool = True
+    ) -> EffectiveVerdict:
         """Load the fail-closed verdict after independently verifying the bundle."""
-        return load_effective_verdict(self._directory_input(bundle), trust_store=self.trust_store)
+        return load_effective_verdict(
+            self._directory_input(bundle),
+            trust_store=self.trust_store,
+            require_current_trust=require_current_trust,
+        )
 
     def validate_event_snapshot(
         self,

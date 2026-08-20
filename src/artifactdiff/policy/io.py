@@ -1,6 +1,7 @@
 """Bounded, nondisclosing YAML and JSON policy file IO."""
 
 import json
+import os
 import re
 import tempfile
 import unicodedata
@@ -182,7 +183,7 @@ def load_policy(path: Path) -> ContractPolicy:
     return _validated_payload(text, suffix)
 
 
-def write_policy(policy: ContractPolicy, path: Path) -> Path:
+def write_policy(policy: ContractPolicy, path: Path, *, overwrite: bool = True) -> Path:
     """Atomically write deterministic policy JSON or safe YAML."""
     suffix = path.suffix.casefold()
     if suffix not in SUPPORTED_POLICY_SUFFIXES:
@@ -211,7 +212,10 @@ def write_policy(policy: ContractPolicy, path: Path) -> Path:
             temporary = Path(stream.name)
             stream.write(contents)
             stream.flush()
-        temporary.replace(path)
+        if overwrite:
+            temporary.replace(path)
+        else:
+            os.link(temporary, path, follow_symlinks=False)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

@@ -4,6 +4,7 @@ from pathlib import Path
 import yaml
 from typer.testing import CliRunner
 
+from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.cli import app
 from tests.factories import make_docx
 
@@ -65,6 +66,104 @@ def test_policy_create_writes_contract_safe_json_and_refuses_overwrite(tmp_path:
     assert json.loads(policy.read_text(encoding="utf-8"))["profile"] == "contract-safe"
     assert repeated.exit_code == 2
     assert policy.read_bytes() == original
+
+
+def test_policy_create_without_force_preserves_a_concurrent_creator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The advisory existence check must not permit a later creator to be replaced."""
+    baseline = make_docx(
+        tmp_path / "baseline.docx",
+        heading="Payment Terms",
+        paragraphs=["Payment is due within 30 days."],
+        rows=[["Column"]],
+    )
+    output = tmp_path / "policy.json"
+    concurrent = b"concurrent creator owns these bytes"
+    original = ArtifactDiffApplication.write_policy
+
+    def race(self, policy, destination: Path, **kwargs):
+        destination.write_bytes(concurrent)
+        if kwargs:
+            return original(self, policy, destination, **kwargs)
+        return original(self, policy, destination)
+
+    monkeypatch.setattr(ArtifactDiffApplication, "write_policy", race)
+    result = runner.invoke(
+        app,
+        [
+            "policy",
+            "create",
+            str(baseline),
+            "--output",
+            str(output),
+            "--rule-id",
+            "payment-window",
+            "--clause",
+            "",
+            "--heading",
+            "Payment Terms",
+            "--anchor",
+            "Payment is due within 30 days.",
+            "--before",
+            "30 days",
+            "--after",
+            "45 days",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert output.read_bytes() == concurrent
+    assert "Traceback" not in result.output
+
+
+def test_policy_create_with_force_replaces_a_concurrent_creator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Explicit force must retain the documented replacement capability."""
+    baseline = make_docx(
+        tmp_path / "baseline.docx",
+        heading="Payment Terms",
+        paragraphs=["Payment is due within 30 days."],
+        rows=[["Column"]],
+    )
+    output = tmp_path / "policy.json"
+    concurrent = b"concurrent creator"
+    original = ArtifactDiffApplication.write_policy
+
+    def race(self, policy, destination: Path, **kwargs):
+        destination.write_bytes(concurrent)
+        if kwargs:
+            return original(self, policy, destination, **kwargs)
+        return original(self, policy, destination)
+
+    monkeypatch.setattr(ArtifactDiffApplication, "write_policy", race)
+    result = runner.invoke(
+        app,
+        [
+            "policy",
+            "create",
+            str(baseline),
+            "--output",
+            str(output),
+            "--rule-id",
+            "payment-window",
+            "--clause",
+            "",
+            "--heading",
+            "Payment Terms",
+            "--anchor",
+            "Payment is due within 30 days.",
+            "--before",
+            "30 days",
+            "--after",
+            "45 days",
+            "--force-output",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert output.read_bytes() != concurrent
 
 
 def test_policy_validate_prints_the_resolved_clause_identifier(tmp_path: Path) -> None:

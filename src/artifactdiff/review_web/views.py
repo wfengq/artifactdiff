@@ -76,6 +76,7 @@ class ReviewViews:
     target_path: Path
     signing_provider: ReviewSigningProvider | None
     output_path: Path | None = None
+    force_output: bool = False
     _draft: ContractPolicy | None = None
 
     def policy_overview(self) -> dict[str, object]:
@@ -167,7 +168,7 @@ class ReviewViews:
         artifact = SealedPolicyArtifact(frozen=sealed.frozen, authorization=authorization)
         if self.output_path is None:
             raise PolicyValidationError("sealed policy output is not configured")
-        write_sealed_policy(artifact, self.output_path)
+        write_sealed_policy(artifact, self.output_path, overwrite=self.force_output)
         return {
             "state": "policy-ready",
             "assurance": request.assurance,

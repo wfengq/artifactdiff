@@ -221,7 +221,9 @@ def validate_approval_event_snapshot(
     return effective
 
 
-def load_effective_verdict(bundle: Path, *, trust_store: TrustStore) -> EffectiveVerdict:
+def load_effective_verdict(
+    bundle: Path, *, trust_store: TrustStore, require_current_trust: bool = True
+) -> EffectiveVerdict:
     root = _root(bundle)
     verification = verify_review_bundle(root, trust_store=trust_store)
     if not verification.valid:
@@ -233,6 +235,7 @@ def load_effective_verdict(bundle: Path, *, trust_store: TrustStore) -> Effectiv
         _verdict(root),
         events,
         trust_store=trust_store,
+        require_current_trust=require_current_trust,
     )
 
 

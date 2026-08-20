@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 import artifactdiff.review_web.server as review_server_module
+from artifactdiff.errors import ArtifactDiffError
 from artifactdiff.review_web.app import ReviewContext, create_review_app
 from artifactdiff.review_web.server import ReviewServer, serve_review
 from tests.review_web_client import AsgiClient
@@ -208,6 +209,105 @@ def test_server_binds_an_ipv4_loopback_socket_and_stops_without_a_child_process(
         server.shutdown()
 
     assert not server.thread.is_alive()
+
+
+def test_bind_failure_closes_listener_and_raises_public_domain_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A handled bind failure must neither leak a listener nor expose its OS diagnostic."""
+    secret = "private bind diagnostic"
+
+    class Listener:
+        family = socket.AF_INET
+        closed = False
+
+        def setsockopt(self, *_args: object) -> None:
+            return None
+
+        def bind(self, _address: object) -> None:
+            raise OSError(secret)
+
+        def close(self) -> None:
+            self.closed = True
+
+    listener = Listener()
+    monkeypatch.setattr(review_server_module.socket, "socket", lambda *_args: listener)
+    context = ReviewContext(
+        application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
+    )
+
+    with pytest.raises(ArtifactDiffError, match="local review server operation failed") as caught:
+        serve_review(context, open_browser=False)
+
+    assert listener.closed
+    assert secret not in str(caught.value)
+
+
+def test_browser_start_failure_stops_server_and_closes_listener(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A failed browser launch must unwind the already-started loopback lifecycle."""
+    created: list[ReviewServer] = []
+    secret = "private browser diagnostic"
+
+    def capture_server(*args: object, **kwargs: object) -> ReviewServer:
+        server = ReviewServer(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(server)
+        return server
+
+    def fail_browser(_url: str) -> bool:
+        raise review_server_module.webbrowser.Error(secret)
+
+    monkeypatch.setattr(review_server_module, "ReviewServer", capture_server)
+    monkeypatch.setattr(review_server_module.webbrowser, "open", fail_browser)
+    context = ReviewContext(
+        application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
+    )
+
+    try:
+        with pytest.raises(
+            ArtifactDiffError, match="local review server operation failed"
+        ) as caught:
+            serve_review(context, open_browser=True)
+        assert len(created) == 1
+        assert created[0].closed
+        assert not created[0].thread.is_alive()
+        assert secret not in str(caught.value)
+        assert "token=" not in capsys.readouterr().out
+    finally:
+        if created:
+            created[0].shutdown()
+
+
+def test_browser_refusal_stops_server_without_printing_launch_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A browser controller returning false is a startup failure, not a live desk."""
+    created: list[ReviewServer] = []
+
+    def capture_server(*args: object, **kwargs: object) -> ReviewServer:
+        server = ReviewServer(*args, **kwargs)  # type: ignore[arg-type]
+        created.append(server)
+        return server
+
+    monkeypatch.setattr(review_server_module, "ReviewServer", capture_server)
+    monkeypatch.setattr(review_server_module.webbrowser, "open", lambda _url: False)
+    context = ReviewContext(
+        application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
+    )
+
+    try:
+        with pytest.raises(ArtifactDiffError, match="local review server operation failed"):
+            serve_review(context, open_browser=True)
+        assert len(created) == 1
+        assert created[0].closed
+        assert not created[0].thread.is_alive()
+        assert "token=" not in capsys.readouterr().out
+    finally:
+        if created:
+            created[0].shutdown()
 
 
 def test_authenticated_shutdown_request_stops_the_live_loopback_server(tmp_path: Path) -> None:

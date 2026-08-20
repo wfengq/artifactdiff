@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import stat
 from pathlib import Path
@@ -8,12 +9,21 @@ import pytest
 from mcp.shared.memory import create_connected_server_and_client_session
 
 from artifactdiff.application import ArtifactDiffApplication
+from artifactdiff.bundle import write_review_bundle
 from artifactdiff.contract import ClauseSelector
-from artifactdiff.errors import InputValidationError
+from artifactdiff.errors import InputValidationError, SignatureError
 from artifactdiff.mcp_paths import McpRoots
 from artifactdiff.mcp_server import create_mcp, mcp
+from artifactdiff.review import approve_finding
 from artifactdiff.session import SealedPolicyArtifact, write_sealed_policy
 from artifactdiff.trust import TrustStore
+from artifactdiff.verification import (
+    Finding,
+    FindingEvidence,
+    FindingOutcome,
+    RawVerdict,
+    finding_id,
+)
 from tests.factories import make_contract_docx
 
 
@@ -41,7 +51,7 @@ async def test_mcp_exposes_bounded_contract_tools_but_no_approval() -> None:
         "get_review_finding",
         "verify_review_bundle",
     }
-    assert not any("approve" in name or "sign_verified" in name for name in names)
+    assert not any("approve" in name or "sign" in name for name in names)
 
 
 async def _call(mcp, name: str, arguments: dict[str, object]) -> dict[str, object]:
@@ -58,6 +68,214 @@ def configured_mcp(tmp_path: Path):
     inputs.mkdir()
     outputs.mkdir()
     return create_mcp(McpRoots(inputs=(inputs,), outputs=(outputs,)))
+
+
+def _verification_mcp(bundle_fixture: object, trust_store: TrustStore):
+    output = bundle_fixture.destination.parent / "mcp-output"
+    output.mkdir()
+    roots = McpRoots(inputs=(bundle_fixture.destination,), outputs=(output,))
+    return create_mcp(roots, trust_store=trust_store)
+
+
+@pytest.mark.anyio
+async def test_mcp_injected_trust_store_verifies_a_signed_bundle(bundle_fixture: object) -> None:
+    """A deployed read-only verifier must not hardcode an empty trust store."""
+    bundle = write_review_bundle(
+        **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer)
+    )
+    server = _verification_mcp(bundle_fixture, bundle_fixture.trust_store)
+
+    response = await _call(server, "verify_review_bundle", {"bundle_path": str(bundle)})
+
+    assert response == {
+        "ok": True,
+        "valid": True,
+        "assurance": "verified",
+        "signature_valid_at_creation": True,
+        "currently_trusted": True,
+        "effective_outcome": "pass",
+    }
+
+
+@pytest.mark.anyio
+async def test_mcp_reports_historical_validity_after_current_trust_is_revoked(
+    bundle_fixture: object,
+) -> None:
+    """Revocation changes current trust, not the historical cryptographic result."""
+    bundle = write_review_bundle(
+        **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer)
+    )
+    revoked = bundle_fixture.trust_store.model_copy(
+        update={
+            "identities": [
+                identity.model_copy(update={"revoked": True})
+                for identity in bundle_fixture.trust_store.identities
+            ]
+        }
+    )
+    server = _verification_mcp(bundle_fixture, revoked)
+
+    response = await _call(server, "verify_review_bundle", {"bundle_path": str(bundle)})
+
+    assert response == {
+        "ok": True,
+        "valid": True,
+        "assurance": "verified",
+        "signature_valid_at_creation": True,
+        "currently_trusted": False,
+        "effective_outcome": "pass",
+    }
+
+
+@pytest.mark.anyio
+async def test_mcp_reports_historical_effective_outcome_after_approver_revocation(
+    bundle_fixture: object,
+) -> None:
+    """A historically valid approval remains reportable after its signer is revoked."""
+    finding = Finding(
+        id=finding_id(
+            rule_id="contract-safe.allow",
+            rule_version="1.0",
+            location="clause:historical-approval",
+            before_fingerprint="a" * 64,
+            after_fingerprint="b" * 64,
+        ),
+        rule_id="contract-safe.allow",
+        outcome=FindingOutcome.REVIEW,
+        location="clause:historical-approval",
+        evidence=FindingEvidence(
+            before_fingerprint="a" * 64,
+            after_fingerprint="b" * 64,
+        ),
+        remediation="Review this exact finding.",
+        approvable=True,
+    )
+    verdict = RawVerdict(
+        outcome=FindingOutcome.REVIEW,
+        policy_sha256=bundle_fixture.frozen.canonical_sha256,
+        baseline_sha256=bundle_fixture.run.facts.baseline_sha256,
+        candidate_sha256=bundle_fixture.run.facts.candidate_sha256,
+        findings=[finding],
+    )
+    run = dataclasses.replace(bundle_fixture.run, result=verdict)
+    bundle = write_review_bundle(
+        **{
+            **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer),
+            "run": run,
+        }
+    )
+    approve_finding(
+        bundle,
+        finding.id,
+        "Historically approved against the signed instruction",
+        signer=bundle_fixture.approver_signer,
+        trust_store=bundle_fixture.trust_store,
+    )
+    revoked = bundle_fixture.trust_store.model_copy(
+        update={
+            "identities": [
+                identity.model_copy(update={"revoked": True})
+                if identity.id == bundle_fixture.approver_signer.identity.id
+                else identity
+                for identity in bundle_fixture.trust_store.identities
+            ]
+        }
+    )
+    server = _verification_mcp(bundle_fixture, revoked)
+
+    response = await _call(server, "verify_review_bundle", {"bundle_path": str(bundle)})
+
+    assert response == {
+        "ok": True,
+        "valid": True,
+        "assurance": "verified",
+        "signature_valid_at_creation": True,
+        "currently_trusted": False,
+        "effective_outcome": "pass",
+    }
+
+
+@pytest.mark.anyio
+async def test_mcp_loads_trust_store_from_bounded_environment_path(
+    bundle_fixture: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stdio deployment path must consume its configured read-only trust store."""
+    trust_path = bundle_fixture.destination / "trust-store.json"
+    trust_path.write_text(bundle_fixture.trust_store.model_dump_json(), encoding="utf-8")
+    output = bundle_fixture.destination.parent / "mcp-output"
+    output.mkdir()
+    bundle = write_review_bundle(
+        **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer)
+    )
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_INPUT_ROOTS", str(bundle_fixture.destination))
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_OUTPUT_ROOTS", str(output))
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_TRUST_STORE", str(trust_path))
+    server = create_mcp()
+
+    response = await _call(server, "verify_review_bundle", {"bundle_path": str(bundle)})
+
+    assert response["ok"] is True
+    assert response["assurance"] == "verified"
+    assert response["currently_trusted"] is True
+
+
+@pytest.mark.anyio
+async def test_mcp_malformed_trust_configuration_fails_without_disclosure(
+    bundle_fixture: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Malformed configured trust bytes must produce one bounded public tool error."""
+    secret = "PRIVATE TRUST STORE PARSER DETAIL"
+    trust_path = bundle_fixture.destination / "trust-store.json"
+    trust_path.write_text(secret, encoding="utf-8")
+    output = bundle_fixture.destination.parent / "mcp-output"
+    output.mkdir()
+    bundle = write_review_bundle(
+        **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer)
+    )
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_INPUT_ROOTS", str(bundle_fixture.destination))
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_OUTPUT_ROOTS", str(output))
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_TRUST_STORE", str(trust_path))
+    server = create_mcp()
+
+    response = await _call(server, "verify_review_bundle", {"bundle_path": str(bundle)})
+
+    assert response == {
+        "ok": False,
+        "error_type": SignatureError.__name__,
+        "error": "invalid MCP trust store configuration",
+    }
+    assert secret not in json.dumps(response)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", ["relative", "oversized"])
+async def test_mcp_rejects_unbounded_trust_store_configuration(
+    bundle_fixture: object, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    """Trust configuration must be absolute and bounded before server-side parsing."""
+    trust_path = bundle_fixture.destination / "trust-store.json"
+    if case == "relative":
+        configured_path = "trust-store.json"
+    else:
+        trust_path.write_bytes(b"{" + b" " * (1024 * 1024 + 1) + b"}")
+        configured_path = str(trust_path)
+    output = bundle_fixture.destination.parent / "mcp-output"
+    output.mkdir()
+    bundle = write_review_bundle(
+        **bundle_fixture.verified_args(manifest_signer=bundle_fixture.archive_signer)
+    )
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_INPUT_ROOTS", str(bundle_fixture.destination))
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_OUTPUT_ROOTS", str(output))
+    monkeypatch.setenv("ARTIFACTDIFF_MCP_TRUST_STORE", configured_path)
+    server = create_mcp()
+
+    response = await _call(server, "verify_review_bundle", {"bundle_path": str(bundle)})
+
+    assert response == {
+        "ok": False,
+        "error_type": SignatureError.__name__,
+        "error": "invalid MCP trust store configuration",
+    }
 
 
 def _contract_pair(root: Path) -> tuple[Path, Path]:

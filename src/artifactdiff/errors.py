@@ -37,6 +37,10 @@ class SessionError(ArtifactDiffError):
     """Raised when a verified edit session cannot be safely created or loaded."""
 
 
+class ReviewServerError(ArtifactDiffError, RuntimeError):
+    """Raised when the local review server cannot complete its lifecycle."""
+
+
 class BundleError(ArtifactDiffError):
     """Raised when a Review Bundle cannot be safely created or verified."""
 
