@@ -14,6 +14,7 @@ from pathlib import Path
 from PIL import Image
 from pydantic import ValidationError
 
+from artifactdiff.atomic import replace_directory
 from artifactdiff.errors import EvidenceError
 from artifactdiff.evidence.models import EvidenceIndex, EvidenceItem, EvidenceKind
 from artifactdiff.models import ComparisonResult
@@ -251,7 +252,7 @@ def collect_evidence(
             ),
             encoding="utf-8",
         )
-        staging.replace(destination)
+        replace_directory(staging, destination)
         return index
     except EvidenceError:
         raise

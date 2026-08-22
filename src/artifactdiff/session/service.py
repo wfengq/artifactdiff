@@ -14,6 +14,7 @@ from pathlib import Path
 from pydantic import BaseModel, ValidationError
 from pydantic_core import PydanticSerializationError
 
+from artifactdiff.atomic import replace_directory
 from artifactdiff.errors import PathSafetyError, PolicyValidationError, SessionError, SignatureError
 from artifactdiff.fs_safety import PathPolicy
 from artifactdiff.normalize import sha256_file
@@ -381,7 +382,7 @@ def open_verified_edit_session(
         baseline_snapshot.chmod(stat.S_IREAD)
         if sha256_file(baseline_snapshot) != snapshot_baseline_digest:
             raise SessionError("baseline snapshot changed before session publication")
-        staging.replace(final)
+        replace_directory(staging, final)
         return session
     except (PathSafetyError, SignatureError, SessionError):
         raise

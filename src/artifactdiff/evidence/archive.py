@@ -14,6 +14,7 @@ from typing import IO
 
 from pydantic import ValidationError
 
+from artifactdiff.atomic import replace_directory
 from artifactdiff.bundle.digests import canonical_bytes, canonical_digest
 from artifactdiff.bundle.models import BundleAssurance, BundleManifest
 from artifactdiff.errors import EvidenceError
@@ -366,7 +367,7 @@ def extract_bundle_archive(archive: Path, destination: Path) -> Path:
             bundle = staging / root_name
             if not bundle.is_dir() or not (bundle / "COMPLETE").is_file():
                 raise EvidenceError("archive does not contain a complete review bundle")
-        staging.replace(destination)
+        replace_directory(staging, destination)
         return destination / root_name
     except EvidenceError:
         raise

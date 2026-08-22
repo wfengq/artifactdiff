@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory, mkdtemp
 from PIL import Image
 
 from artifactdiff.alignment import AlignedPair, align_sequences
+from artifactdiff.atomic import replace_directory
 from artifactdiff.errors import InputValidationError, RenderUnavailableError
 from artifactdiff.models import DocumentSnapshot, PageSnapshot, Rect, VisualPageChange
 from artifactdiff.visual import VisualAssets, compare_images
@@ -253,8 +254,8 @@ def _copy_visual_assets(assets: VisualAssets, destination: Path) -> VisualAssets
         if destination.exists():
             backup = Path(mkdtemp(prefix=f".{destination.name}.", dir=visual_root))
             backup.rmdir()
-            destination.replace(backup)
-        staging.replace(destination)
+            replace_directory(destination, backup)
+        replace_directory(staging, destination)
         if backup is not None:
             rmtree(backup)
             backup = None
@@ -262,7 +263,7 @@ def _copy_visual_assets(assets: VisualAssets, destination: Path) -> VisualAssets
         if staging.exists():
             rmtree(staging)
         if backup is not None and backup.exists() and not destination.exists():
-            backup.replace(destination)
+            replace_directory(backup, destination)
         if visual_root_created:
             visual_root.rmdir()
         raise

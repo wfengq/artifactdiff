@@ -11,6 +11,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from artifactdiff.atomic import replace_directory
 from artifactdiff.bundle.digests import canonical_bytes, canonical_digest, canonical_file_digest
 from artifactdiff.bundle.models import BundleAssurance, BundleManifest, BundlePayload
 from artifactdiff.errors import BundleError
@@ -354,7 +355,7 @@ def write_review_bundle(
             if not final.is_dir() or not _trees_equal(staging, final):
                 raise BundleError("review bundle destination collision is invalid")
             return final
-        staging.replace(final)
+        replace_directory(staging, final)
         return final
     except BundleError:
         raise

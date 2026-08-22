@@ -7,6 +7,7 @@ from pathlib import Path
 from shutil import rmtree
 from tempfile import TemporaryDirectory, mkdtemp
 
+from artifactdiff.atomic import replace_directory
 from artifactdiff.contract import load_contract
 from artifactdiff.errors import InputValidationError, PolicyValidationError
 from artifactdiff.limits import validate_source
@@ -214,14 +215,14 @@ def _visual_output_transaction(output_root: Path) -> Iterator[None]:
     if visual_root.is_dir():
         backup = Path(mkdtemp(prefix=".artifactdiff-visual-backup.", dir=output_root))
         backup.rmdir()
-        visual_root.replace(backup)
+        replace_directory(visual_root, backup)
     try:
         yield
     except BaseException:
         if visual_root.is_dir() and not visual_root.is_symlink():
             rmtree(visual_root)
         if backup is not None:
-            backup.replace(visual_root)
+            replace_directory(backup, visual_root)
             backup = None
         raise
     else:
