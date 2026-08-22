@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 import artifactdiff.review_web.server as review_server_module
-from artifactdiff.errors import ArtifactDiffError
+from artifactdiff.errors import ArtifactDiffError, ReviewServerError
 from artifactdiff.review_web.app import ReviewContext, create_review_app
 from artifactdiff.review_web.server import ReviewServer, serve_review
 from tests.review_web_client import AsgiClient
@@ -582,6 +582,120 @@ def test_simultaneous_shutdown_callers_close_the_listener_once() -> None:
 
     assert review_server.closed
     assert close_count == 1
+
+
+def test_uvicorn_worker_failure_never_reaches_threading_excepthook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A worker failure must become one generic owner-thread error, never a traceback."""
+    secret = "SECRET UVICORN FAILURE"
+    unhandled: list[BaseException] = []
+
+    def fail_run(*args: object, **kwargs: object) -> None:
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(review_server_module.uvicorn.Server, "run", fail_run)
+    monkeypatch.setattr(
+        threading,
+        "excepthook",
+        lambda arguments: unhandled.append(arguments.exc_value),
+    )
+    context = ReviewContext(
+        application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
+    )
+
+    with pytest.raises(ReviewServerError, match="local review server operation failed"):
+        serve_review(context, open_browser=False)
+
+    captured = capsys.readouterr()
+    assert unhandled == []
+    assert secret not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_worker_finalizer_close_failure_is_sanitized_and_owner_cleanup_is_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A close error in the worker must not escape its thread or prevent owner cleanup."""
+    secret = "SECRET LISTENER CLOSE FAILURE"
+    unhandled: list[BaseException] = []
+
+    class Listener:
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise OSError(secret)
+
+    class Server:
+        should_exit = False
+
+    holder: list[ReviewServer] = []
+    thread = threading.Thread(target=lambda: holder[0].finalize_after_server_exit())
+    listener = Listener()
+    review_server = ReviewServer(
+        "http://127.0.0.1/",
+        listener,
+        thread,
+        Server(),  # type: ignore[arg-type]
+    )
+    holder.append(review_server)
+    monkeypatch.setattr(
+        threading,
+        "excepthook",
+        lambda arguments: unhandled.append(arguments.exc_value),
+    )
+
+    thread.start()
+    thread.join(timeout=1.0)
+
+    assert not thread.is_alive()
+    assert unhandled == []
+    with pytest.raises(ReviewServerError, match="local review server operation failed"):
+        review_server.shutdown()
+    assert review_server.closed
+    assert listener.close_calls == 2
+
+
+def test_shutdown_surfaces_worker_failure_recorded_during_join() -> None:
+    """A worker that closes during join must not make its pending failure disappear."""
+
+    class Listener:
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class Server:
+        should_exit = False
+
+    class Thread:
+        server: ReviewServer | None = None
+
+        def join(self, timeout: float) -> None:
+            assert self.server is not None
+            self.server.record_worker_failure()
+            self.server.finalize_after_server_exit()
+
+        def is_alive(self) -> bool:
+            return False
+
+    listener = Listener()
+    thread = Thread()
+    review_server = ReviewServer(
+        "http://127.0.0.1/",
+        listener,
+        thread,  # type: ignore[arg-type]
+        Server(),  # type: ignore[arg-type]
+    )
+    thread.server = review_server
+
+    with pytest.raises(ReviewServerError, match="local review server operation failed"):
+        review_server.shutdown()
+
+    assert review_server.closed
+    assert listener.close_calls == 1
 
 
 def _raw_response(host: str, port: int, request: str) -> str:

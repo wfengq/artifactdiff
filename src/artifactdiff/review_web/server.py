@@ -35,6 +35,7 @@ class ReviewServer:
     _idle_timer: threading.Timer | None = field(default=None, repr=False)
     _watchdog_generation: int = 0
     _idle_deadline: float | None = None
+    _worker_failure_pending: bool = False
 
     @property
     def closed(self) -> bool:
@@ -45,6 +46,17 @@ class ReviewServer:
     def shutdown_requested(self) -> bool:
         with self._lock:
             return self._state != "running"
+
+    def record_worker_failure(self) -> None:
+        """Record a nondisclosing failure for the owner thread to surface once."""
+        with self._lock:
+            self._worker_failure_pending = True
+
+    def _consume_worker_failure(self) -> bool:
+        with self._lock:
+            failed = self._worker_failure_pending
+            self._worker_failure_pending = False
+            return failed
 
     def reset_idle_timer(self) -> None:
         """Keep the one owner-managed idle watchdog alive after valid loopback activity."""
@@ -95,6 +107,8 @@ class ReviewServer:
         """Stop and close once; a timeout remains retryable until cleanup completes."""
         with self._lock:
             if self._state == "closed":
+                if self._consume_worker_failure():
+                    raise ReviewServerError("local review server operation failed")
                 return
             self._request_shutdown_locked()
         try:
@@ -106,14 +120,15 @@ class ReviewServer:
         except (OSError, RuntimeError):
             raise ReviewServerError("local review server operation failed") from None
         with self._finalizer_lock:
-            if self.closed:
-                return
-            try:
-                self.socket.close()
-            except OSError:
-                raise ReviewServerError("local review server operation failed") from None
-            with self._lock:
-                self._state = "closed"
+            if not self.closed:
+                try:
+                    self.socket.close()
+                except OSError:
+                    raise ReviewServerError("local review server operation failed") from None
+                with self._lock:
+                    self._state = "closed"
+        if self._consume_worker_failure():
+            raise ReviewServerError("local review server operation failed")
 
     def finalize_after_server_exit(self) -> None:
         """Release the listener when an idle request stops Uvicorn without an owner call."""
@@ -127,7 +142,11 @@ class ReviewServer:
                 if self._idle_timer is not None:
                     self._idle_timer.cancel()
                     self._idle_timer = None
-            self.socket.close()
+            try:
+                self.socket.close()
+            except OSError:
+                self.record_worker_failure()
+                return
             with self._lock:
                 self._state = "closed"
 
@@ -160,8 +179,13 @@ def serve_review(context: ReviewContext, *, open_browser: bool = True) -> Review
         def run_server() -> None:
             try:
                 uvicorn_server.run(sockets=[listener])
+            except Exception:
+                holder[0].record_worker_failure()
             finally:
-                holder[0].finalize_after_server_exit()
+                try:
+                    holder[0].finalize_after_server_exit()
+                except Exception:
+                    holder[0].record_worker_failure()
 
         thread = threading.Thread(
             target=run_server, name="artifactdiff-review-loopback", daemon=False
