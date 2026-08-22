@@ -23,4 +23,3 @@ def test_comparison_schema_defaults_to_v1() -> None:
 
     assert result.schema_version == "1.0"
     assert result.changes == []
-
