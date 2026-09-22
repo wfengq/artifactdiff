@@ -82,8 +82,15 @@ class ReviewServer:
                 self._state != "running"
                 or self._watchdog_generation != generation
                 or self._idle_deadline != deadline
-                or time.monotonic() < deadline
             ):
+                return
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                self._idle_timer = threading.Timer(
+                    remaining, self._idle_expired, args=(generation, deadline)
+                )
+                self._idle_timer.daemon = True
+                self._idle_timer.start()
                 return
             self._request_shutdown_locked()
 

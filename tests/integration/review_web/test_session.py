@@ -361,6 +361,28 @@ def test_idle_server_stops_and_releases_its_listener(
         socket.create_connection(address, timeout=0.2)
 
 
+def test_early_idle_callback_keeps_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A timer callback before its deadline must not leave the listener running."""
+    monkeypatch.setattr("artifactdiff.review_web.server._IDLE_TIMEOUT_SECONDS", 0.5)
+    context = ReviewContext(
+        application=object(), mode="bundle", target_path=tmp_path, signing_provider=None
+    )
+    server = serve_review(context, open_browser=False)
+    try:
+        assert server._idle_timer is not None
+        assert server._idle_deadline is not None
+        server._idle_timer.cancel()
+        assert time.monotonic() < server._idle_deadline
+        server._idle_expired(server._watchdog_generation, server._idle_deadline)
+
+        server.thread.join(timeout=2.0)
+        assert not server.thread.is_alive()
+    finally:
+        server.shutdown()
+
+
 def test_accepted_loopback_activity_resets_the_idle_deadline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
