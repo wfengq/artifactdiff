@@ -1,6 +1,7 @@
 import hashlib
 import json
 import unicodedata
+from enum import StrEnum
 
 import pytest
 
@@ -16,6 +17,17 @@ from artifactdiff.policy import (
     canonical_policy_bytes,
     policy_digest,
 )
+from artifactdiff.policy.canonical import _normalize
+
+
+def test_normalized_enum_is_plain_string_for_yaml_without_changing_json() -> None:
+    class Mode(StrEnum):
+        MINIMAL = "minimal"
+
+    normalized = _normalize(Mode.MINIMAL)
+    assert type(normalized) is str
+    assert normalized == "minimal"
+    assert json.dumps(normalized) == json.dumps(Mode.MINIMAL)
 
 
 def _selector(heading: str = "Payment") -> ClauseSelector:

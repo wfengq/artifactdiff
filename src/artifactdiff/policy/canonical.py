@@ -30,7 +30,9 @@ def _normalize(value: object) -> CanonicalValue:
     if isinstance(value, Path):
         return _normalized_string(value.as_posix())
     if isinstance(value, str):
-        return _normalized_string(value)
+        # StrEnum is a str subclass. Unicode normalization may preserve the
+        # subclass, while safe YAML serialization only accepts a plain str.
+        return _normalized_string(str(value))
     if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
