@@ -15,6 +15,7 @@ from artifactdiff.contract.numbering import ClauseMarker, parse_clause_marker
         ("4.2 Payment timing", "decimal", 2, "4.2"),
         ("Article IV Payment Terms", "article", 1, "Article IV"),
         ("Section 4.2 Payment timing", "section", 2, "Section 4.2"),
+        ("第1节 订立依据", "section", 1, "第1节"),
     ],
 )
 def test_parse_clause_marker(

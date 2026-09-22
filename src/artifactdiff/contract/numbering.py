@@ -24,6 +24,11 @@ PATTERNS: tuple[tuple[str, Pattern[str], Callable[[Match[str]], int]], ...] = (
         lambda _: 1,
     ),
     (
+        "section",
+        re.compile(r"^(\u7b2c\s*(\d+(?:\.\d+)*)\s*\u8282)\s*(.*)$"),
+        lambda match: match.group(2).count(".") + 1,
+    ),
+    (
         "article",
         re.compile(r"^(Article\s+[IVXLCDM0-9]+)\b[.\uff1a:]?\s*(.*)$", re.I),
         lambda _: 1,
