@@ -97,3 +97,30 @@ def test_unrelated_entity_insertion_does_not_renumber_repeated_values(
         if (item.kind.value, item.normalized_value) in {("currency", "CNY"), ("money", "100")}
     ]
     assert inserted_ids == baseline_ids
+
+
+@pytest.mark.parametrize(
+    ("text", "kind", "value"),
+    [
+        ("甲方应于30天内付款。", "duration", "30 day"),
+        ("合同价款为人民币10000元。", "money", "10000"),
+        ("合同价款为人民币100万元。", "money", "1000000"),
+        ("甲方（接收方）：杭州示例科技有限公司；", "party", "杭州示例科技有限公司"),
+        ("违约金为百分之五。", "percentage", "5"),
+    ],
+)
+def test_extract_entities_supports_common_chinese_contract_forms(
+    evidence: EvidenceRef, text: str, kind: str, value: str
+) -> None:
+    observed = {
+        (item.kind.value, item.normalized_value)
+        for item in extract_entities(text, "clause-zh", evidence)
+    }
+    assert (kind, value) in observed
+
+
+def test_chinese_date_components_are_not_duplicated_as_durations(evidence: EvidenceRef) -> None:
+    entities = extract_entities("签订日期为2026年9月21日。", "clause-date", evidence)
+    assert [(item.kind.value, item.normalized_value) for item in entities] == [
+        ("date", "2026-09-21")
+    ]
