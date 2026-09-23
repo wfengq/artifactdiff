@@ -74,6 +74,70 @@ def test_short_inline_sentence_is_not_a_display_heading() -> None:
     assert extract_independent_headings(snapshot, analyze_contract(snapshot)) == ["第一条 付款条件"]
 
 
+def test_short_title_after_label_colon_is_not_treated_as_sentence() -> None:
+    from artifactdiff.contract.headings import extract_independent_headings
+
+    snapshot = _pdf_snapshot(
+        ("第十条：双方责任", 105, 270),
+        ("第十一条：甲方应当按约定付款。", 105, 485),
+    )
+
+    assert extract_independent_headings(snapshot, analyze_contract(snapshot)) == [
+        "第十条 双方责任"
+    ]
+
+
+def test_usage_notes_end_at_repeated_contract_title() -> None:
+    from artifactdiff.contract.headings import extract_independent_headings
+
+    snapshot = _pdf_snapshot(
+        ("委托合同", 220, 340),
+        ("使用说明", 220, 340),
+        ("六、名词解释", 105, 250),
+        ("委托合同", 220, 340),
+        ("一、服务范围", 105, 240),
+        ("第一条 服务内容", 105, 250),
+    )
+
+    assert extract_independent_headings(snapshot, analyze_contract(snapshot)) == [
+        "一、 服务范围",
+        "第一条 服务内容",
+    ]
+
+
+def test_usage_note_marker_without_repeated_contract_title_does_not_hide_body() -> None:
+    from artifactdiff.contract.headings import extract_independent_headings
+
+    snapshot = _pdf_snapshot(
+        ("使用说明", 220, 340),
+        ("一、劳动合同期限", 105, 240),
+        ("第一条 服务内容", 105, 250),
+    )
+
+    assert extract_independent_headings(snapshot, analyze_contract(snapshot)) == [
+        "一、 劳动合同期限",
+        "第一条 服务内容",
+    ]
+
+
+def test_late_repeated_title_cannot_hide_earlier_contract_articles() -> None:
+    from artifactdiff.contract.headings import extract_independent_headings
+
+    snapshot = _pdf_snapshot(
+        ("委托合同", 220, 340),
+        ("使用说明", 220, 340),
+        ("六、名词解释", 105, 250),
+        ("第一条 服务内容", 105, 250),
+        ("委托合同", 220, 340),
+        ("第二条 付款条件", 105, 250),
+    )
+
+    headings = extract_independent_headings(snapshot, analyze_contract(snapshot))
+
+    assert "第一条 服务内容" in headings
+    assert "第二条 付款条件" in headings
+
+
 def test_top_level_chinese_list_survives_wrong_ir_parent_and_spaced_pdf_glyphs() -> None:
     from artifactdiff.contract.headings import extract_independent_headings
 
