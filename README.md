@@ -1,43 +1,45 @@
 # ArtifactDiff
 
-**A contract change verification gate for humans and AI agents.**
+ArtifactDiff 是一个本地运行的合同修改核验原型。用户先指定允许修改的条款，
+系统再检查候选 DOCX 或带文字层的 PDF，给出 `PASS`、`REVIEW` 或 `FAIL`，
+并保存可校验的审查记录。目前已有合成合同端到端演示；真实合同适配仍在验证，
+扫描件和部分多栏、复杂版式尚未可靠支持。
 
-Prove that an AI agent changed only the Office/PDF contract terms you authorized —
-semantically, visually, and cryptographically — before the document is delivered.
+ArtifactDiff checks whether a contract edit made by a person or an AI agent matches a
+policy that was approved before editing. It combines semantic rules, protected values,
+occurrence checks, and visual evidence. The result is stored in a content-addressed
+Review Bundle that can be checked later for unexpected modification.
 
-ArtifactDiff is local-first and offline. It turns a requested edit such as “change the
-payment window from 30 days to 45 days” into a frozen policy, verifies the candidate,
-and writes an immutable Review Bundle that both humans and agents can inspect.
+> Project status: `0.1.0` alpha. The signed synthetic Golden Path is implemented, and
+> the repository has more than 900 automated tests. Packaging, broader real-contract
+> evaluation, and public release automation remain in progress.
 
-> Project status: `0.1.0` alpha. The contract-safe core and signed Golden Path are
-> implemented and covered by more than 900 automated tests. Packaging and public release
-> automation are still in progress.
+## Verdicts
 
-## What it catches
-
-| Candidate | Verdict | Delivery gate |
+| Candidate | Verdict | Delivery decision |
 | --- | --- | --- |
-| Only the exact authorized clause occurrence changed | **PASS** | May proceed |
-| The edit is semantically allowed but has an unexplained layout change | **REVIEW** | Blocked until a human approves that finding |
-| A party, amount, date, signature, seal, attachment, or other protected content changed | **FAIL** | Blocked and not approvable |
+| The expected clause occurrence changed, and the required evidence is available | **PASS** | May proceed under the configured policy |
+| The edit appears allowed, but visual evidence is missing or contains an unexplained change | **REVIEW** | Blocked until a human reviews the finding |
+| A protected value changed outside the authorization, or an expected edit is missing | **FAIL** | Blocked and not approvable |
 
-ArtifactDiff is deliberately fail-closed. **Review remains blocking by default** and a
-FAIL finding cannot be approved away.
+ArtifactDiff fails closed. `REVIEW` blocks delivery by default, and a `FAIL` finding
+cannot be approved away. A `PASS` is a software verdict under the configured policy.
+It is not legal approval of a contract.
 
-## Three-minute Golden Path
+## Run the synthetic Golden Path
 
-Prerequisites: Python 3.11+ and a local checkout of this repository. The demo uses only
-synthetic contracts and makes no network request after dependencies are installed.
+You need Python 3.11 or later and a local checkout. The demo generates synthetic
+contracts and makes no network request after the dependencies are installed.
 
 ```console
 python -m venv .venv
-# Activate .venv using your shell, then:
+# Activate .venv using your shell, then run:
 python -m pip install -e ".[dev]"
 python scripts/run_contract_golden_path.py --output build/contract-golden-path
 python -m json.tool build/contract-golden-path/summary.json
 ```
 
-The run creates three independently verified, Ed25519-signed Review Bundles:
+The command writes three Ed25519-signed Review Bundles and verifies them from disk:
 
 ```text
 authorized    raw=pass    effective=pass
@@ -45,54 +47,55 @@ review        raw=review  effective=review
 unauthorized  raw=fail    effective=fail
 ```
 
-The `review` case stays blocked. To demonstrate the signed event-chain transition with
-an explicitly simulated synthetic human reviewer, use a different output directory:
+The `review` case stays blocked. To demonstrate a signed decision from a simulated
+human reviewer, use a separate output directory:
 
 ```console
 python scripts/run_contract_golden_path.py --output build/contract-golden-path-approved --approve-review
 ```
 
-`--approve-review` is demo-only. Real approvals remain interactive human actions through
-`artifactdiff review` or `artifactdiff approve`; agents cannot approve their own
-findings. See the [Golden Path walkthrough](examples/contract-golden-path/README.md) for
-the generated files and privacy boundaries.
+`--approve-review` exists only for the synthetic demo. In normal use, a person approves
+a finding through `artifactdiff review` or `artifactdiff approve`. An agent cannot
+approve its own finding. The [Golden Path walkthrough](examples/contract-golden-path/README.md)
+describes the generated files and privacy boundaries.
 
-## The workflow
+## Verification flow
 
 ```text
 Human instruction
-      │
-      ▼
-contract-safe policy ── freeze + optional Ed25519 authorization
-      │
-      ▼
-controlled agent edit session
-      │
-      ▼
-semantic rules + protected entities + visual envelope
-      │
-      ├── PASS ───────────────────────────────► deliver
-      ├── REVIEW ─► signed per-finding review ─► deliver or reject
-      └── FAIL ───────────────────────────────► reject
-                          │
-                          ▼
-                 immutable Review Bundle
+      |
+      v
+contract-safe policy: freeze and optional Ed25519 authorization
+      |
+      v
+controlled edit session
+      |
+      v
+semantic rules, protected values, and visual evidence
+      |
+      +-- PASS ------------------------------------> deliver
+      +-- REVIEW --> signed human decision --------> deliver or reject
+      +-- FAIL ------------------------------------> reject
+                              |
+                              v
+              content-addressed Review Bundle
 ```
 
-The Review Bundle is the system of record. The local review desk is only an authenticated
-loopback interface over that bundle.
+The Review Bundle is the stored record. It includes the policy, comparison facts,
+verdict, evidence index, and signed events when verified assurance is enabled. The
+verifier recomputes file digests and signature claims from the bundle bytes.
 
-## Human and automation interfaces
+## Interfaces
 
-The same application boundary powers every interface:
+The interfaces use the same verdict and evidence data:
 
-- **CLI:** create/validate/seal policies, open controlled sessions, verify changes,
-  inspect findings, approve findings, and verify or pack bundles.
-- **Local review desk:** inspect a bundle and sign one finding at a time without sending
-  contracts or private keys to browser JavaScript.
-- **MCP:** bounded inspect/draft/validate/local-verify tools for AI agents, with separate
-  input and output roots and no approval or verified-signing capability.
-- **Offline HTML:** portable human review reports linked to verified facts.
+- **CLI:** create, validate, and seal policies; run verification; inspect findings;
+  record human decisions; and verify or pack bundles.
+- **Local review desk:** inspect a bundle and sign one finding at a time. Contract files
+  and private keys are not sent to browser JavaScript.
+- **MCP:** inspect, draft, validate, and run local verification from bounded input and
+  output roots. MCP cannot approve findings or perform verified signing.
+- **Offline HTML:** create a portable report linked to the recorded facts.
 
 ```console
 artifactdiff --help
@@ -101,8 +104,8 @@ artifactdiff verify --help
 artifactdiff review path/to/review-bundle
 ```
 
-For an MCP host, configure absolute, path-separator-delimited roots before starting the
-stdio server:
+For an MCP host, configure absolute input and output roots before starting the stdio
+server. Separate multiple roots with the platform path separator.
 
 ```text
 ARTIFACTDIFF_MCP_INPUT_ROOTS=/absolute/contracts
@@ -110,43 +113,54 @@ ARTIFACTDIFF_MCP_OUTPUT_ROOTS=/absolute/artifactdiff-output
 artifactdiff-mcp
 ```
 
-MCP intentionally cannot approve findings or perform verified signing.
+## How this differs from a plain document diff
 
-## Why this is not another PDF diff
-
-| Ordinary document diff | ArtifactDiff |
+| Plain document diff | ArtifactDiff |
 | --- | --- |
-| Shows everything that changed | Proves whether changes match a pre-authorized instruction |
-| Text or pixels are the final result | Semantic, protected-entity, occurrence, metadata, and visual rules combine into one gate |
-| A screenshot/report is the evidence | Content-addressed Review Bundle with policy, facts, verdict, evidence, signatures, and append-only decisions |
-| Designed only for a person looking at two files | CLI, Python, MCP, offline report, and human review desk share one truth model |
-| “Looks fine” may pass | REVIEW and unavailable evidence block by default |
+| Lists changed text or pixels | Checks changes against a policy created before editing |
+| Leaves every change for a person to interpret | Separates allowed edits, protected-value changes, and unavailable evidence |
+| Produces a report or screenshot | Writes a content-addressed bundle with facts, evidence, verdicts, and optional signatures |
+| Usually has one human-facing interface | Uses the same data through the CLI, Python API, MCP server, HTML report, and review desk |
+| May treat missing evidence as no visible change | Returns a blocking verdict when required evidence is unavailable |
 
 ## Security and privacy model
 
-- Local-first and offline; no account or cloud service is required.
-- `contract-safe` is enabled by default, with no implicit authorization.
-- Exact expected edits are bound to their clause and occurrence.
-- Parties, money, currencies, dates, durations, percentages, headers, footers,
-  signatures, seals, and attachments are protected by default.
-- Offline Ed25519 is the core trust mechanism; enterprise identity can be added through
-  adapters later.
-- Evidence defaults to `minimal`; `full` is explicit and `sealed` is encrypted for named
-  recipients.
+- The default workflow runs locally and does not require an account or cloud service.
+- `contract-safe` is enabled by default and grants no implicit authorization.
+- Expected edits bind to a clause, an occurrence, and the text before and after the edit.
+- Recognized parties, money, currencies, dates, durations, percentages, headers,
+  footers, signatures, seals, and attachments are protected by default.
+- Ed25519 signatures provide the implemented offline trust mechanism. Enterprise
+  identity support is not implemented.
+- Evidence defaults to `minimal`. `full` is explicit, and `sealed` encrypts evidence for
+  named recipients.
 - MCP responses are bounded and do not return full contracts, page images, or key
   material.
 
-Read the approved [verification-gate design](docs/superpowers/specs/2026-08-04-artifactdiff-contract-verification-gate-design.md)
-and the [Plan 4.5 acceptance record](docs/plan-4.5-contract-golden-path.md) for the full
+Read the [verification-gate design](docs/superpowers/specs/2026-08-04-artifactdiff-contract-verification-gate-design.md)
+and the [Golden Path acceptance record](docs/plan-4.5-contract-golden-path.md) for the
 trust and verdict model.
 
-## Current format support
+## Supported inputs and current limits
 
-- PDF → PDF
-- DOCX → DOCX
-- DOCX → PDF
-- English, Chinese, and bilingual contract structure
-- Optional DOCX rendering through LibreOffice; PDF rendering is local
+The implemented paths cover:
+
+- DOCX compared with DOCX.
+- Text-based PDF compared with text-based PDF.
+- DOCX compared with a rendered PDF when LibreOffice rendering is configured.
+- Selected English, Chinese, and bilingual contract examples.
+
+The current limits are material:
+
+- ArtifactDiff does not perform OCR. A scanned PDF without extractable text produces a
+  warning and cannot receive the same text verification as a text-based PDF.
+- Multi-column PDFs, tables, and unusual reading orders can produce incorrect text
+  grouping. These layouts require human review and more evaluation.
+- Protected-value extraction uses deterministic patterns. It is not a legal named-entity
+  model and does not claim to recognize every contract term.
+- The end-to-end Golden Path uses synthetic contracts. Tests on selected external
+  documents do not establish production accuracy or a zero-false-pass rate.
+- ArtifactDiff is an engineering prototype, not a substitute for legal review.
 
 ## Development
 
@@ -155,16 +169,17 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-The repository currently contains unit, integration, tamper, CLI, MCP, review-desk,
-cross-format, and signed Golden Path acceptance coverage.
+The test suite includes unit, integration, tamper, CLI, MCP, review-desk, cross-format,
+and signed Golden Path coverage.
 
-## Next milestones
+## Planned work
 
-- Reproducible public synthetic corpus and zero-false-pass gate
-- GitHub Action for binary-document pull request review
-- Demo media and downloadable example Review Bundle
-- Schemas, threat model, SBOM, provenance, and signed alpha release
-- Plugin boundaries for enterprise parsers, renderers, signing, encryption, and storage
+- Publish a reproducible synthetic corpus and a measured false-pass gate.
+- Add a GitHub Action for binary-document pull request review.
+- Publish demo media and an example Review Bundle.
+- Publish schemas, a threat model, an SBOM, provenance, and a signed alpha release.
+- Define adapter boundaries for enterprise parsers, renderers, signing, encryption, and
+  storage.
 
-ArtifactDiff is being built around one narrow promise: **when an agent edits a contract,
-you can prove exactly what it was allowed to change — and that it changed nothing else.**
+The project has one narrow goal: make an agent's permitted contract edit and the
+evidence for its verdict inspectable before delivery.
