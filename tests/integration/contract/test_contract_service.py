@@ -100,6 +100,21 @@ def test_inspect_contract_bounds_independent_headings_with_clauses(tmp_path: Pat
     assert payload["truncated_headings"] is True
 
 
+def test_inspect_contract_excludes_docx_running_text_from_headings(tmp_path: Path) -> None:
+    from docx import Document
+
+    source = tmp_path / "contract.docx"
+    document = Document()
+    document.add_heading("第一条 付款条件", level=1)
+    document.sections[0].header.paragraphs[0].text = "第一章 合同主体"
+    document.sections[0].footer.paragraphs[0].text = "二、 服务范围"
+    document.save(source)
+
+    payload = inspect_contract(source)
+
+    assert payload["independent_headings"] == ["第一条 付款条件"]
+
+
 @pytest.mark.parametrize("fill_line", [True, False])
 def test_numbered_pdf_fill_blank_is_not_a_heading(tmp_path: Path, fill_line: bool) -> None:
     from reportlab.pdfbase.pdfmetrics import stringWidth

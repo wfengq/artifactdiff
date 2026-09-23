@@ -1,5 +1,7 @@
 """Independent display headings are not the same as numbered IR clauses."""
 
+import pytest
+
 from artifactdiff.contract.analyzer import analyze_contract
 from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot, PageSnapshot, Rect
 from artifactdiff.normalize import normalize_text
@@ -187,3 +189,36 @@ def test_docx_heading_style_is_evidence_even_without_number_or_with_colon() -> N
     )
 
     assert extract_independent_headings(snapshot, analyze_contract(snapshot)) == ["付款条件："]
+
+
+@pytest.mark.parametrize("content_type", [ContentType.HEADER, ContentType.FOOTER])
+def test_docx_running_text_is_not_a_contract_heading(content_type: ContentType) -> None:
+    from artifactdiff.contract.headings import extract_independent_headings
+
+    running_text = "第一章 合同主体"
+    heading = "第一条 付款条件"
+    blocks = [
+        ContentBlock(
+            id="running-text",
+            ordinal=0,
+            content_type=content_type,
+            text=running_text,
+            normalized_text=normalize_text(running_text),
+        ),
+        ContentBlock(
+            id="body-heading",
+            ordinal=1,
+            content_type=ContentType.HEADING,
+            text=heading,
+            normalized_text=normalize_text(heading),
+        ),
+    ]
+    snapshot = DocumentSnapshot(
+        source_path="example.docx",
+        format="docx",
+        sha256="a" * 64,
+        size_bytes=1,
+        blocks=blocks,
+    )
+
+    assert extract_independent_headings(snapshot, analyze_contract(snapshot)) == [heading]

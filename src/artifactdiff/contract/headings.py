@@ -67,6 +67,8 @@ def extract_independent_headings(
     headings: list[str] = []
     seen: set[str] = set()
     for index, block in enumerate(snapshot.blocks):
+        if block.content_type in {ContentType.HEADER, ContentType.FOOTER}:
+            continue
         text = block.text.strip()
         spaced_han = _SPACED_HAN.search(text) is not None
         if spaced_han:
