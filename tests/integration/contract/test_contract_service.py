@@ -115,6 +115,24 @@ def test_inspect_contract_excludes_docx_running_text_from_headings(tmp_path: Pat
     assert payload["independent_headings"] == ["第一条 付款条件"]
 
 
+def test_inspect_contract_excludes_hidden_docx_text_from_headings(tmp_path: Path) -> None:
+    from docx import Document
+
+    source = tmp_path / "hidden-headings.docx"
+    document = Document()
+    hidden_only = document.add_paragraph().add_run("第一章 Secret")
+    hidden_only.font.hidden = True
+    partially_hidden = document.add_paragraph()
+    partially_hidden.add_run("第二章 Visible")
+    hidden_suffix = partially_hidden.add_run(" Secret")
+    hidden_suffix.font.hidden = True
+    document.save(source)
+
+    payload = inspect_contract(source)
+
+    assert payload["independent_headings"] == ["第二章 Visible"]
+
+
 @pytest.mark.parametrize("fill_line", [True, False])
 def test_numbered_pdf_fill_blank_is_not_a_heading(tmp_path: Path, fill_line: bool) -> None:
     from reportlab.pdfbase.pdfmetrics import stringWidth

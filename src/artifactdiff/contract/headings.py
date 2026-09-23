@@ -6,6 +6,7 @@ ordinary body text. This view is deliberately narrower than the clause tree.
 
 import re
 
+from artifactdiff.contract.analyzer import visible_contract_blocks
 from artifactdiff.contract.models import ContractClause, ContractDocument
 from artifactdiff.contract.numbering import parse_clause_marker
 from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot
@@ -21,19 +22,19 @@ _SENTENCE_PUNCTUATION = frozenset("。！？；;：:")
 _PDF_TITLE_RIGHT_EDGE = 0.74
 
 
-def _body_start_after_usage_notes(snapshot: DocumentSnapshot) -> int:
+def _body_start_after_usage_notes(snapshot: DocumentSnapshot, blocks: list[ContentBlock]) -> int:
     if snapshot.format != "pdf":
         return 0
-    for index, block in enumerate(snapshot.blocks):
+    for index, block in enumerate(blocks):
         if block.text.strip() not in _USAGE_NOTE_TITLES:
             continue
         cover_titles = {
             previous.text.strip()
-            for previous in snapshot.blocks[:index]
+            for previous in blocks[:index]
             if _CONTRACT_TITLE.fullmatch(previous.text.strip())
         }
-        for body_index in range(index + 1, len(snapshot.blocks)):
-            body_text = snapshot.blocks[body_index].text.strip()
+        for body_index in range(index + 1, len(blocks)):
+            body_text = blocks[body_index].text.strip()
             marker = parse_clause_marker(body_text)
             if marker is not None and marker.label.scheme != "chinese_list":
                 return 0
@@ -100,8 +101,9 @@ def extract_independent_headings(
     accepted_ids: set[str] = set()
     headings: list[str] = []
     seen: set[str] = set()
-    body_start = _body_start_after_usage_notes(snapshot)
-    for index, block in enumerate(snapshot.blocks):
+    blocks = visible_contract_blocks(snapshot)
+    body_start = _body_start_after_usage_notes(snapshot, blocks)
+    for index, block in enumerate(blocks):
         if index < body_start:
             continue
         if block.content_type in {ContentType.HEADER, ContentType.FOOTER}:
@@ -130,7 +132,7 @@ def extract_independent_headings(
                 accepted_ids.add(clause.id)
             continue
         if clause is None:
-            next_block = snapshot.blocks[index + 1] if index + 1 < len(snapshot.blocks) else None
+            next_block = blocks[index + 1] if index + 1 < len(blocks) else None
             next_clause = clauses_by_start.get(next_block.id) if next_block is not None else None
             followed_by_numbered_heading = (
                 next_block is not None
