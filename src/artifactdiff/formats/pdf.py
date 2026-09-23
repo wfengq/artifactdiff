@@ -19,6 +19,84 @@ from artifactdiff.normalize import fingerprint, normalize_text
 
 MAX_PAGES = 500
 RENDER_SCALE = 2.0
+_MIN_TWO_COLUMN_ROWS = 8
+_MIN_TWO_COLUMN_ROW_RATIO = 0.6
+_MIN_COLUMN_GUTTER_RATIO = 0.025
+
+_PdfWord = dict[str, Any]
+_PdfLine = tuple[str, float, float, float, float]
+
+
+def _group_rows(words: Iterable[_PdfWord]) -> list[list[_PdfWord]]:
+    ordered = sorted(
+        words,
+        key=lambda word: (float(word["top"]), float(word["x0"]), str(word["text"])),
+    )
+    rows: list[list[_PdfWord]] = []
+    for word in ordered:
+        if not rows or float(word["top"]) - float(rows[-1][0]["top"]) > 3:
+            rows.append([word])
+        else:
+            rows[-1].append(word)
+    return rows
+
+
+def _line(words: list[_PdfWord]) -> _PdfLine:
+    ordered = sorted(
+        words,
+        key=lambda word: (float(word["x0"]), float(word["top"]), str(word["text"])),
+    )
+    return (
+        " ".join(str(word["text"]) for word in ordered),
+        min(float(word["x0"]) for word in ordered),
+        min(float(word["top"]) for word in ordered),
+        max(float(word["x1"]) for word in ordered),
+        max(float(word["bottom"]) for word in ordered),
+    )
+
+
+def _has_two_columns(rows: list[list[_PdfWord]], page_width: float) -> bool:
+    if len(rows) < _MIN_TWO_COLUMN_ROWS:
+        return False
+    midpoint = page_width / 2
+    minimum_gutter = page_width * _MIN_COLUMN_GUTTER_RATIO
+    separated_rows = 0
+    for row in rows:
+        left_edges = [float(word["x1"]) for word in row if float(word["x1"]) <= midpoint]
+        right_edges = [float(word["x0"]) for word in row if float(word["x0"]) >= midpoint]
+        if left_edges and right_edges and min(right_edges) - max(left_edges) >= minimum_gutter:
+            separated_rows += 1
+    return (
+        separated_rows >= _MIN_TWO_COLUMN_ROWS
+        and separated_rows / len(rows) >= _MIN_TWO_COLUMN_ROW_RATIO
+    )
+
+
+def _column_ordered_lines(rows: list[list[_PdfWord]], page_width: float) -> list[_PdfLine]:
+    midpoint = page_width / 2
+    lines: list[_PdfLine] = []
+    left_rows: list[list[_PdfWord]] = []
+    right_rows: list[list[_PdfWord]] = []
+
+    def flush_columns() -> None:
+        lines.extend(_line(row) for row in left_rows)
+        lines.extend(_line(row) for row in right_rows)
+        left_rows.clear()
+        right_rows.clear()
+
+    for row in rows:
+        if any(float(word["x0"]) < midpoint < float(word["x1"]) for word in row):
+            flush_columns()
+            lines.append(_line(row))
+            continue
+        left = [word for word in row if float(word["x1"]) <= midpoint]
+        right = [word for word in row if float(word["x0"]) >= midpoint]
+        if left:
+            left_rows.append(left)
+        if right:
+            right_rows.append(right)
+    flush_columns()
+    return lines
 
 
 class _CloseStack:
@@ -91,7 +169,7 @@ class PdfAdapter:
 
     def _extract_page(self, page: Any, page_index: int) -> PageSnapshot:
         words = page.extract_words(use_text_flow=True, keep_blank_chars=False) or []
-        lines = self._lines(words)
+        lines = self._lines(words, float(page.width))
         blocks = [
             ContentBlock(
                 id=f"pdf:{page_index}:{ordinal}:{fingerprint(text)}",
@@ -115,31 +193,11 @@ class PdfAdapter:
         )
 
     @staticmethod
-    def _lines(words: Iterable[dict[str, Any]]) -> list[tuple[str, float, float, float, float]]:
-        ordered = sorted(
-            words,
-            key=lambda word: (float(word["top"]), float(word["x0"]), str(word["text"])),
-        )
-        grouped: list[list[dict[str, Any]]] = []
-        for word in ordered:
-            if not grouped or float(word["top"]) - float(grouped[-1][0]["top"]) > 3:
-                grouped.append([word])
-            else:
-                grouped[-1].append(word)
-
-        lines: list[tuple[str, float, float, float, float]] = []
-        for line in grouped:
-            line.sort(key=lambda word: (float(word["x0"]), float(word["top"]), str(word["text"])))
-            lines.append(
-                (
-                    " ".join(str(word["text"]) for word in line),
-                    min(float(word["x0"]) for word in line),
-                    min(float(word["top"]) for word in line),
-                    max(float(word["x1"]) for word in line),
-                    max(float(word["bottom"]) for word in line),
-                )
-            )
-        return lines
+    def _lines(words: Iterable[_PdfWord], page_width: float) -> list[_PdfLine]:
+        rows = _group_rows(words)
+        if _has_two_columns(rows, page_width):
+            return _column_ordered_lines(rows, page_width)
+        return [_line(row) for row in rows]
 
     @staticmethod
     def _render_pages(path: Path, pages: list[PageSnapshot], workdir: Path) -> None:

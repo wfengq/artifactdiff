@@ -51,6 +51,23 @@ class FakeDocument:
         return None
 
 
+class WordPage(FakePage):
+    width = 840
+    height = 600
+
+    def __init__(self, words: list[dict[str, object]]) -> None:
+        super().__init__()
+        self.words = words
+
+    def extract_words(self, **kwargs: object) -> list[object]:
+        assert kwargs == {'use_text_flow': True, 'keep_blank_chars': False}
+        return self.words
+
+
+def word(text: str, x0: float, top: float, x1: float, bottom: float) -> dict[str, object]:
+    return {'text': text, 'x0': x0, 'top': top, 'x1': x1, 'bottom': bottom}
+
+
 def fake_large_pdf(monkeypatch: pytest.MonkeyPatch, path: Path) -> Path:
     path.write_bytes(b'%PDF-1.4')
     monkeypatch.setattr(pdf_module.pdfplumber, 'open', lambda _: FakeDocument(501))
@@ -232,6 +249,49 @@ def test_pdf_adapter_preserves_reading_order_and_renders_at_144_dpi(tmp_path: Pa
     with Image.open(snapshot.pages[0].render_path) as image:
         assert image.mode == 'RGB'
         assert image.size == (1224, 1584)
+
+
+def test_pdf_adapter_reads_detected_two_column_page_by_column() -> None:
+    words = [word('2', 418, 560, 422, 570)]
+    left_lines = ['合同责任', '第一条 旅行社责任', *[f'左栏正文{i}' for i in range(1, 9)]]
+    right_lines = [*[f'右栏正文{i}' for i in range(1, 9)], '第三条 不可抗力', '右栏结尾']
+    for index, (left, right) in enumerate(zip(left_lines, right_lines, strict=True)):
+        top = 80 + index * 20
+        words.extend(
+            [
+                word(left, 72, top, 350, top + 12),
+                word(right, 450, top, 768, top + 12),
+            ]
+        )
+
+    page = PdfAdapter()._extract_page(WordPage(words), 0)
+
+    assert [block.text for block in page.blocks] == [*left_lines, *right_lines, '2']
+
+
+def test_pdf_adapter_does_not_split_sparse_two_sided_form_rows() -> None:
+    words: list[dict[str, object]] = []
+    expected: list[str] = []
+    for index in range(10):
+        top = 80 + index * 20
+        if index % 2 == 0:
+            left = f'字段{index}'
+            right = f'填写值{index}'
+            words.extend(
+                [
+                    word(left, 72, top, 220, top + 12),
+                    word(right, 500, top, 650, top + 12),
+                ]
+            )
+            expected.append(f'{left} {right}')
+        else:
+            text = f'跨页宽说明文字{index}'
+            words.append(word(text, 72, top, 650, top + 12))
+            expected.append(text)
+
+    page = PdfAdapter()._extract_page(WordPage(words), 0)
+
+    assert [block.text for block in page.blocks] == expected
 
 
 def test_pdf_adapter_rejects_corrupt_pdf(tmp_path: Path) -> None:
