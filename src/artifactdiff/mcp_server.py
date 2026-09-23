@@ -165,6 +165,20 @@ def _selector_candidates(inspection: dict[str, object]) -> list[dict[str, object
     return [_bounded_clause(clause) for clause in clauses[:_MAX_ITEMS] if isinstance(clause, dict)]
 
 
+def _bounded_independent_headings(inspection: dict[str, object]) -> tuple[list[str], bool]:
+    headings = inspection.get("independent_headings", [])
+    if not isinstance(headings, list):
+        return [], bool(inspection.get("truncated_headings", False))
+    values = [heading for heading in headings if isinstance(heading, str)]
+    selected = values[:_MAX_ITEMS]
+    truncated = (
+        bool(inspection.get("truncated_headings", False))
+        or len(values) > len(selected)
+        or any(len(heading) > _MAX_SELECTOR_HEADING for heading in selected)
+    )
+    return [heading[:_MAX_SELECTOR_HEADING] for heading in selected], truncated
+
+
 def _finding_summary(finding: Finding) -> dict[str, object]:
     return {
         "id": finding.id,
@@ -390,6 +404,7 @@ def create_mcp(roots: McpRoots | None = None, *, trust_store: TrustStore | None 
     async def inspect_contract_tool(path: str) -> dict[str, object]:
         inspection = require_application().inspect_contract(Path(path), max_clauses=_MAX_ITEMS)
         candidates = _selector_candidates(inspection)
+        headings, truncated_headings = _bounded_independent_headings(inspection)
         source = inspection.get("source")
         warnings = inspection.get("warnings")
         return {
@@ -397,7 +412,9 @@ def create_mcp(roots: McpRoots | None = None, *, trust_store: TrustStore | None 
             "schema_version": inspection.get("schema_version"),
             "source_sha256": source.get("sha256") if isinstance(source, dict) else None,
             "clauses": candidates,
+            "independent_headings": headings,
             "truncated_clauses": bool(inspection.get("truncated_clauses", False)),
+            "truncated_headings": truncated_headings,
             "warnings": list(warnings) if isinstance(warnings, list) else [],
         }
 

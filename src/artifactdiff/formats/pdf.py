@@ -27,6 +27,18 @@ _PdfWord = dict[str, Any]
 _PdfLine = tuple[str, float, float, float, float]
 
 
+def _has_trailing_fill_line(
+    strokes: list[dict[str, Any]], text_right: float, text_bottom: float
+) -> bool:
+    return any(
+        abs(float(stroke["top"]) - float(stroke["bottom"])) <= 1
+        and -3 <= float(stroke["x0"]) - text_right <= 12
+        and float(stroke["x1"]) - float(stroke["x0"]) >= 48
+        and abs(float(stroke["top"]) - text_bottom) <= 4
+        for stroke in strokes
+    )
+
+
 def _group_rows(words: Iterable[_PdfWord]) -> list[list[_PdfWord]]:
     ordered = sorted(
         words,
@@ -170,6 +182,11 @@ class PdfAdapter:
     def _extract_page(self, page: Any, page_index: int) -> PageSnapshot:
         words = page.extract_words(use_text_flow=True, keep_blank_chars=False) or []
         lines = self._lines(words, float(page.width))
+        horizontal_strokes = [
+            stroke
+            for stroke in (getattr(page, "lines", None) or [])
+            if float(stroke["x1"]) > float(stroke["x0"])
+        ]
         blocks = [
             ContentBlock(
                 id=f"pdf:{page_index}:{ordinal}:{fingerprint(text)}",
@@ -179,6 +196,9 @@ class PdfAdapter:
                 text=text,
                 normalized_text=normalize_text(text),
                 bbox=Rect(x0=x0, y0=top, x1=x1, y1=bottom),
+                metadata={"trailing_fill_line": True}
+                if _has_trailing_fill_line(horizontal_strokes, x1, bottom)
+                else {},
             )
             for ordinal, (text, x0, top, x1, bottom) in enumerate(lines)
         ]

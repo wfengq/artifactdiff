@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from typing import cast
 
 from artifactdiff.contract.analyzer import analyze_contract
+from artifactdiff.contract.headings import extract_independent_headings
 from artifactdiff.contract.models import ContractDocument
 from artifactdiff.errors import InputValidationError
 from artifactdiff.formats import adapter_for
@@ -35,13 +36,16 @@ def inspect_contract(
         raise InputValidationError("max_clauses must be between 0 and 1000")
     source = validate_source(path, force=force, require_absolute=require_absolute)
     with TemporaryDirectory(prefix="artifactdiff-contract-") as temporary:
-        _, contract = load_contract(
+        snapshot, contract = load_contract(
             source,
             render=False,
             force=force,
             workdir=Path(temporary),
         )
     payload = contract.model_dump(mode="json")
+    headings = extract_independent_headings(snapshot, contract)
+    payload["independent_headings"] = headings[:max_clauses]
+    payload["truncated_headings"] = len(headings) > max_clauses
     payload["clauses"] = payload["clauses"][:max_clauses]
     payload["truncated_clauses"] = len(contract.clauses) > max_clauses
     return cast(dict[str, object], payload)
