@@ -164,17 +164,8 @@ def _marker_for(block: ContentBlock) -> ClauseMarker | None:
     return parse_clause_marker(block.text)
 
 
-def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
-    """Analyze one snapshot into stable clauses, entities, tables, and protected regions."""
-    drafts: list[_ClauseDraft] = []
-    stack: list[int] = []
-    active_index: int | None = None
-    tables: list[EvidenceRef] = []
-    protected_regions: list[ProtectedRegion] = []
-    raw_features = snapshot.metadata.get("document_features", [])
-    if not isinstance(raw_features, list):
-        raise TypeError("document_features metadata must be a list")
-    features = [DocumentFeature.model_validate(item) for item in raw_features]
+def visible_contract_blocks(snapshot: DocumentSnapshot) -> list[ContentBlock]:
+    """Return the text blocks seen by contract analysis, excluding hidden text."""
     raw_visible_text = snapshot.metadata.get(CONTRACT_VISIBLE_TEXT_METADATA_KEY)
     if raw_visible_text is not None and not isinstance(raw_visible_text, dict):
         raise TypeError(f"{CONTRACT_VISIBLE_TEXT_METADATA_KEY} metadata must be an object")
@@ -194,6 +185,21 @@ def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
                 }
             )
         )
+    return contract_blocks
+
+
+def analyze_contract(snapshot: DocumentSnapshot) -> ContractDocument:
+    """Analyze one snapshot into stable clauses, entities, tables, and protected regions."""
+    drafts: list[_ClauseDraft] = []
+    stack: list[int] = []
+    active_index: int | None = None
+    tables: list[EvidenceRef] = []
+    protected_regions: list[ProtectedRegion] = []
+    raw_features = snapshot.metadata.get("document_features", [])
+    if not isinstance(raw_features, list):
+        raise TypeError("document_features metadata must be a list")
+    features = [DocumentFeature.model_validate(item) for item in raw_features]
+    contract_blocks = visible_contract_blocks(snapshot)
 
     for block in contract_blocks:
         region_kind = _region_kind(block)

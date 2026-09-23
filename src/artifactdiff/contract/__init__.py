@@ -1,5 +1,6 @@
 """Public interfaces for deterministic contract analysis."""
 
+from artifactdiff.contract.headings import extract_independent_headings
 from artifactdiff.contract.language import detect_language
 from artifactdiff.contract.models import (
     ClauseLabel,
@@ -39,6 +40,7 @@ __all__ = [
     "SelectorResolution",
     "SelectorResolutionStatus",
     "detect_language",
+    "extract_independent_headings",
     "inspect_contract",
     "load_contract",
     "resolve_baseline",

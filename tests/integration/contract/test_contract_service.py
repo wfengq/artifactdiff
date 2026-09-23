@@ -90,6 +90,95 @@ def test_pdf_factory_uses_self_contained_cjk_font_without_host_candidates(
     assert cast(dict[str, Any], first_ir["language"])["kind"] == "zh"
 
 
+def test_inspect_contract_bounds_independent_headings_with_clauses(tmp_path: Path) -> None:
+    path = make_contract_pdf(tmp_path / "contract.pdf", language="zh")
+
+    payload = inspect_contract(path, max_clauses=0)
+
+    assert payload["clauses"] == []
+    assert payload["independent_headings"] == []
+    assert payload["truncated_headings"] is True
+
+
+def test_inspect_contract_excludes_docx_running_text_from_headings(tmp_path: Path) -> None:
+    from docx import Document
+
+    source = tmp_path / "contract.docx"
+    document = Document()
+    document.add_heading("第一条 付款条件", level=1)
+    document.sections[0].header.paragraphs[0].text = "第一章 合同主体"
+    document.sections[0].footer.paragraphs[0].text = "二、 服务范围"
+    document.save(source)
+
+    payload = inspect_contract(source)
+
+    assert payload["independent_headings"] == ["第一条 付款条件"]
+
+
+def test_inspect_contract_excludes_hidden_docx_text_from_headings(tmp_path: Path) -> None:
+    from docx import Document
+
+    source = tmp_path / "hidden-headings.docx"
+    document = Document()
+    hidden_only = document.add_paragraph().add_run("第一章 Secret")
+    hidden_only.font.hidden = True
+    partially_hidden = document.add_paragraph()
+    partially_hidden.add_run("第二章 Visible")
+    hidden_suffix = partially_hidden.add_run(" Secret")
+    hidden_suffix.font.hidden = True
+    document.save(source)
+
+    payload = inspect_contract(source)
+
+    assert payload["independent_headings"] == ["第二章 Visible"]
+
+
+@pytest.mark.parametrize("fill_line", [True, False])
+def test_numbered_pdf_fill_blank_is_not_a_heading(tmp_path: Path, fill_line: bool) -> None:
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+    from reportlab.pdfgen import canvas
+
+    path = tmp_path / ("form.pdf" if fill_line else "headings.pdf")
+    document = canvas.Canvas(str(path), invariant=1)
+    document.setFont("Helvetica", 12)
+    document.drawString(100, 700, "Section 2 Termination")
+    document.drawString(100, 660, "2.3 Other")
+    if fill_line:
+        line_start = 100 + stringWidth("2.3 Other", "Helvetica", 12)
+        document.line(line_start, 660, 500, 660)
+    document.save()
+
+    payload = inspect_contract(path)
+
+    assert payload["independent_headings"] == (
+        ["Section 2 Termination"]
+        if fill_line
+        else ["Section 2 Termination", "2.3 Other"]
+    )
+
+
+def test_two_column_pdf_reports_headings_in_both_columns(tmp_path: Path) -> None:
+    from reportlab.pdfgen import canvas
+
+    source = tmp_path / "two-column.pdf"
+    document = canvas.Canvas(str(source), pagesize=(595, 842), invariant=1)
+    document.setFont("Helvetica", 12)
+    for index in range(10):
+        y = 760 - index * 20
+        left = "Section 1 Payment Terms" if index == 0 else f"Left body line {index}."
+        right = "Section 2 Confidentiality" if index == 0 else f"Right body line {index}."
+        document.drawString(70, y, left)
+        document.drawString(335, y, right)
+    document.save()
+
+    payload = inspect_contract(source)
+
+    assert payload["independent_headings"] == [
+        "Section 1 Payment Terms",
+        "Section 2 Confidentiality",
+    ]
+
+
 def test_margin_images_preserve_distinct_chinese_glyph_content() -> None:
     confidential = _margin_image("机密合同").getvalue()
     attachment = _margin_image("价格附件").getvalue()
@@ -142,10 +231,14 @@ def test_inspect_contract_returns_bounded_portable_text_minimizing_ir(
 
     assert len(cast(list[object], bounded["clauses"])) == 2
     assert bounded["truncated_clauses"] is True
-    assert {
-        key: value for key, value in bounded.items() if key not in {"clauses", "truncated_clauses"}
-    } == {
-        key: value for key, value in full.items() if key not in {"clauses", "truncated_clauses"}
+    assert (
+        cast(list[str], bounded["independent_headings"])
+        == cast(list[str], full["independent_headings"])[:2]
+    )
+    assert bounded["truncated_headings"] is True
+    bounded_fields = {"clauses", "truncated_clauses", "independent_headings", "truncated_headings"}
+    assert {key: value for key, value in bounded.items() if key not in bounded_fields} == {
+        key: value for key, value in full.items() if key not in bounded_fields
     }
     serialized = json.dumps(bounded, ensure_ascii=False, sort_keys=True)
     assert "artifactdiff-contract-" not in serialized

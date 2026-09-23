@@ -297,6 +297,13 @@ async def test_mcp_contract_workflow_returns_only_bounded_public_fields(
     inspection = await _call(configured_mcp, "inspect_contract", {"path": str(baseline)})
     assert inspection["ok"] is True
     assert len(inspection["clauses"]) <= 20
+    assert inspection["independent_headings"] == [
+        "Article I Parties",
+        "Article II Payment Terms",
+        "Article III General Terms",
+        "Article IV Attachment",
+    ]
+    assert inspection["truncated_headings"] is False
     assert full_contract_text not in json.dumps(inspection)
 
     drafted = await _call(
@@ -372,6 +379,21 @@ async def test_mcp_contract_workflow_returns_only_bounded_public_fields(
         "currently_trusted": None,
         "effective_outcome": verified["effective_verdict"],
     }
+
+
+@pytest.mark.anyio
+async def test_mcp_contract_headings_are_text_bounded(configured_mcp, tmp_path: Path) -> None:
+    from docx import Document
+
+    source = tmp_path / "inputs" / "long-heading.docx"
+    document = Document()
+    document.add_heading("H" * 600, level=1)
+    document.save(source)
+
+    inspection = await _call(configured_mcp, "inspect_contract", {"path": str(source)})
+
+    assert inspection["independent_headings"] == ["H" * 512]
+    assert inspection["truncated_headings"] is True
 
 
 @pytest.mark.anyio
