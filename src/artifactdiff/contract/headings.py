@@ -59,7 +59,11 @@ def _title_like(text: str, block: ContentBlock, snapshot: DocumentSnapshot) -> b
     if block.page_index >= len(snapshot.pages):
         return False
     page = snapshot.pages[block.page_index]
-    return block.bbox.x1 <= page.width * _PDF_TITLE_RIGHT_EDGE
+    if block.bbox.x0 < page.width / 2:
+        return block.bbox.x1 <= page.width * _PDF_TITLE_RIGHT_EDGE
+    text_width = block.bbox.x1 - block.bbox.x0
+    available_width = page.width - block.bbox.x0
+    return text_width <= available_width * _PDF_TITLE_RIGHT_EDGE
 
 
 def _clause_heading(

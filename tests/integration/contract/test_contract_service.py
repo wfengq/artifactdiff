@@ -139,6 +139,28 @@ def test_numbered_pdf_fill_blank_is_not_a_heading(tmp_path: Path, fill_line: boo
     )
 
 
+def test_two_column_pdf_reports_headings_in_both_columns(tmp_path: Path) -> None:
+    from reportlab.pdfgen import canvas
+
+    source = tmp_path / "two-column.pdf"
+    document = canvas.Canvas(str(source), pagesize=(595, 842), invariant=1)
+    document.setFont("Helvetica", 12)
+    for index in range(10):
+        y = 760 - index * 20
+        left = "Section 1 Payment Terms" if index == 0 else f"Left body line {index}."
+        right = "Section 2 Confidentiality" if index == 0 else f"Right body line {index}."
+        document.drawString(70, y, left)
+        document.drawString(335, y, right)
+    document.save()
+
+    payload = inspect_contract(source)
+
+    assert payload["independent_headings"] == [
+        "Section 1 Payment Terms",
+        "Section 2 Confidentiality",
+    ]
+
+
 def test_margin_images_preserve_distinct_chinese_glyph_content() -> None:
     confidential = _margin_image("机密合同").getvalue()
     attachment = _margin_image("价格附件").getvalue()

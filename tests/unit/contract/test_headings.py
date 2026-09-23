@@ -62,6 +62,19 @@ def test_pdf_display_headings_exclude_instructions_and_inline_clauses() -> None:
     assert any(clause.label.printed == "（一）" for clause in contract.clauses)
 
 
+def test_right_column_long_inline_clause_is_not_a_display_heading() -> None:
+    from artifactdiff.contract.headings import extract_independent_headings
+
+    snapshot = _pdf_snapshot(
+        ("Section 1 Payment Terms", 70, 208),
+        ("Section 2 The provider must continue all specified services", 335, 580),
+    )
+
+    assert extract_independent_headings(snapshot, analyze_contract(snapshot)) == [
+        "Section 1 Payment Terms"
+    ]
+
+
 def test_short_inline_sentence_is_not_a_display_heading() -> None:
     from artifactdiff.contract.headings import extract_independent_headings
 
