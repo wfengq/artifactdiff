@@ -223,6 +223,109 @@ def test_draft_binds_only_source_hash_and_format() -> None:
     assert "937421" not in serialized
 
 
+def test_draft_rejects_selector_destroyed_by_nonnumeric_edit() -> None:
+    text = "第十条 知识产权\n平台外使用需另行获得乙方书面授权。"
+    clause = _clause(label="第十条", heading="知识产权", ancestor_path=(), text=text)
+    baseline = _contract(clause)
+    selector = _selector(clause, anchor="需另行获得乙方书面授权")
+
+    with pytest.raises(PolicyValidationError, match="selector cannot locate expected edit"):
+        draft_exact_replace_policy(
+            baseline,
+            selector,
+            before="需另行获得乙方书面授权",
+            after="需提前获得乙方书面授权",
+            rule_id="outside-platform-use",
+        )
+
+
+def test_draft_accepts_unchanged_context_anchor_for_same_edit() -> None:
+    text = "第十条 知识产权\n平台外使用需另行获得乙方书面授权。"
+    clause = _clause(label="第十条", heading="知识产权", ancestor_path=(), text=text)
+    baseline = _contract(clause)
+    selector = _selector(clause, anchor="平台外使用")
+
+    policy = draft_exact_replace_policy(
+        baseline,
+        selector,
+        before="需另行获得乙方书面授权",
+        after="需提前获得乙方书面授权",
+        rule_id="outside-platform-use",
+    )
+
+    validate_policy(baseline, policy)
+
+
+def test_validate_rejects_selectors_destroyed_by_combined_expected_edits() -> None:
+    clause = _clause(text="Section 4 Payment Terms\nFirst RED; second YELLOW.")
+    baseline = _contract(clause)
+    policy = ContractPolicy(
+        baseline=PolicyBaseline(sha256=baseline.source.sha256, format="docx"),
+        expect=[
+            ExpectedRule(
+                id="first",
+                selector=_selector(clause, anchor="second YELLOW"),
+                operation=ExactReplace(before="RED", after="BLUE"),
+            ),
+            ExpectedRule(
+                id="second",
+                selector=_selector(clause, anchor="First RED"),
+                operation=ExactReplace(before="YELLOW", after="GREEN"),
+            ),
+        ],
+    )
+
+    with pytest.raises(PolicyValidationError, match="selector cannot locate expected edit"):
+        validate_policy(baseline, policy)
+
+
+def test_validate_accepts_combined_edits_with_stable_anchor() -> None:
+    clause = _clause(text="Section 4 Payment Terms\nPay USD 100 within 30 days.")
+    baseline = _contract(clause)
+    selector = _selector(clause, anchor="Payment Terms")
+    policy = ContractPolicy(
+        baseline=PolicyBaseline(sha256=baseline.source.sha256, format="docx"),
+        expect=[
+            ExpectedRule(
+                id="currency",
+                selector=selector,
+                operation=ExactReplace(before="USD", after="EUR"),
+            ),
+            ExpectedRule(
+                id="window",
+                selector=selector,
+                operation=ExactReplace(before="30 days", after="45 days"),
+            ),
+        ],
+    )
+
+    validate_policy(baseline, policy)
+
+
+def test_validate_rejects_overlapping_expected_edits() -> None:
+    clause = _clause(text="Section 4 Payment Terms\nABCDEFGHI.")
+    baseline = _contract(clause)
+    selector = _selector(clause, anchor="Payment Terms")
+    policy = ContractPolicy(
+        baseline=PolicyBaseline(sha256=baseline.source.sha256, format="docx"),
+        expect=[
+            ExpectedRule(
+                id="first",
+                selector=selector,
+                operation=ExactReplace(before="ABC", after="XYZ"),
+            ),
+            ExpectedRule(
+                id="second",
+                selector=selector,
+                operation=ExactReplace(before="BCD", after="UVW"),
+            ),
+        ],
+    )
+
+    with pytest.raises(PolicyValidationError, match="expected replacements overlap"):
+        validate_policy(baseline, policy)
+
+
 def test_draft_rejects_ambiguous_selector_without_disclosing_clause_data() -> None:
     secret = "CUSTOMER_SECRET Payment is due within 30 days."
     first = _clause("clause-a", text=secret)

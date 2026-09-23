@@ -128,6 +128,8 @@ artifactdiff-mcp
 - The default workflow runs locally and does not require an account or cloud service.
 - `contract-safe` is enabled by default and grants no implicit authorization.
 - Expected edits bind to a clause, an occurrence, and the text before and after the edit.
+- Policy validation simulates declared edits and rejects selectors that cannot find
+  the resulting clause. Use an unchanged context phrase as the selector anchor.
 - Recognized parties, money, currencies, dates, durations, percentages, headers,
   footers, signatures, seals, and attachments are protected by default.
 - Ed25519 signatures provide the implemented offline trust mechanism. Enterprise
