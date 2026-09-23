@@ -21,13 +21,13 @@ CHINESE_DATE_PATTERN = re.compile(
     r"(?<!\d)(?P<year>\d{4})\u5e74\s*(?P<month>\d{1,2})\u6708\s*(?P<day>\d{1,2})\u65e5(?!\d)"
 )
 CURRENCY_TOKEN = r"(?<![A-Za-z])(?:RMB|CNY|USD|EUR)(?![A-Za-z])|[\u00a5\uffe5$\u20ac]"
-CURRENCY_PATTERN = re.compile(CURRENCY_TOKEN, re.I)
+CURRENCY_PATTERN = re.compile(CURRENCY_TOKEN, re.IGNORECASE)
 AMOUNT = r"[+-]?\d+(?:,\d{3})*(?:\.\d+)?"
 MONEY_PREFIX_PATTERN = re.compile(
-    rf"(?P<currency>{CURRENCY_TOKEN})\s*(?P<amount>{AMOUNT})", re.I
+    rf"(?P<currency>{CURRENCY_TOKEN})\s*(?P<amount>{AMOUNT})", re.IGNORECASE
 )
 MONEY_SUFFIX_PATTERN = re.compile(
-    rf"(?P<amount>{AMOUNT})\s*(?P<currency>{CURRENCY_TOKEN})", re.I
+    rf"(?P<amount>{AMOUNT})\s*(?P<currency>{CURRENCY_TOKEN})", re.IGNORECASE
 )
 CHINESE_MONEY_PATTERN = re.compile(
     rf"(?P<currency>\u4eba\u6c11\u5e01)\s*(?P<amount>{AMOUNT})\s*"
@@ -91,7 +91,7 @@ def _entity_id(
     clause_id: str | None,
     block_id: str,
 ) -> str:
-    material = f"{kind.value}\0{value}\0{clause_id or ''}\0{block_id}".encode("utf-8")
+    material = f"{kind.value}\0{value}\0{clause_id or ''}\0{block_id}".encode()
     return f"entity-{hashlib.sha256(material).hexdigest()[:24]}"
 
 

@@ -30,12 +30,12 @@ PATTERNS: tuple[tuple[str, Pattern[str], Callable[[Match[str]], int]], ...] = (
     ),
     (
         "article",
-        re.compile(r"^(Article\s+[IVXLCDM0-9]+)\b[.\uff1a:]?\s*(.*)$", re.I),
+        re.compile(r"^(Article\s+[IVXLCDM0-9]+)\b[.\uff1a:]?\s*(.*)$", re.IGNORECASE),
         lambda _: 1,
     ),
     (
         "section",
-        re.compile(r"^(Section\s+(\d+(?:\.\d+)*))\b[.\uff1a:]?\s*(.*)$", re.I),
+        re.compile(r"^(Section\s+(\d+(?:\.\d+)*))\b[.\uff1a:]?\s*(.*)$", re.IGNORECASE),
         lambda match: match.group(2).count(".") + 1,
     ),
     (
