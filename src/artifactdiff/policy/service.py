@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import tempfile
 import unicodedata
 from pathlib import Path
@@ -15,8 +16,10 @@ from artifactdiff.contract import (
     ContractDocument,
     SelectorResolutionStatus,
     resolve_baseline,
+    resolve_candidate,
 )
 from artifactdiff.errors import PolicyValidationError
+from artifactdiff.normalize import fingerprint, normalize_text
 from artifactdiff.policy.canonical import _normalize, canonical_policy_bytes, policy_digest
 from artifactdiff.policy.io import MAX_POLICY_BYTES, _load_json
 from artifactdiff.policy.models import (
@@ -122,6 +125,63 @@ def _validate_exact_operation(clause: ContractClause, rule: ExpectedRule) -> Non
         raise PolicyValidationError("expected replacement occurrence ambiguity")
 
 
+def _apply_independent_replacements(text: str, rules: list[ExpectedRule]) -> str:
+    replacements: list[tuple[int, int, str]] = []
+    for rule in rules:
+        before = _nfc(rule.operation.before)
+        after = _nfc(rule.operation.after)
+        replacements.extend(
+            (match.start(), match.end(), after)
+            for match in re.finditer(re.escape(before), text)
+        )
+    replacements.sort(key=lambda item: (item[0], item[1]))
+    if any(left[1] > right[0] for left, right in zip(replacements, replacements[1:])):
+        raise PolicyValidationError("expected replacements overlap")
+    for start, end, after in reversed(replacements):
+        text = text[:start] + after + text[end:]
+    return text
+
+
+def _validate_expected_candidate(
+    baseline: ContractDocument, resolved_expected: list[tuple[ExpectedRule, ContractClause]]
+) -> None:
+    rules_by_clause: dict[str, list[ExpectedRule]] = {}
+    for rule, clause in resolved_expected:
+        rules_by_clause.setdefault(clause.id, []).append(rule)
+    candidate_clauses = []
+    for clause in baseline.clauses:
+        rules = rules_by_clause.get(clause.id)
+        if not rules:
+            candidate_clauses.append(clause)
+            continue
+        expected_text = _apply_independent_replacements(_nfc(clause.text), rules)
+        expected_heading = _apply_independent_replacements(_nfc(clause.heading), rules)
+        candidate_clauses.append(
+            clause.model_copy(
+                update={
+                    "text": expected_text,
+                    "normalized_text": normalize_text(expected_text),
+                    "fingerprint": fingerprint(expected_text),
+                    "heading": expected_heading,
+                }
+            )
+        )
+    candidate_document = baseline.model_copy(
+        update={"clauses": candidate_clauses}
+    )
+    for rule, clause in resolved_expected:
+        resolution = resolve_candidate(candidate_document, rule.selector)
+        if (
+            resolution.status is not SelectorResolutionStatus.HIGH_CONFIDENCE
+            or not resolution.matches
+            or resolution.matches[0].clause_id != clause.id
+        ):
+            raise PolicyValidationError(
+                "selector cannot locate expected edit after replacement; "
+                "choose an unchanged context anchor"
+            )
+
+
 def draft_exact_replace_policy(
     baseline: ContractDocument,
     selector: ClauseSelector,
@@ -157,6 +217,7 @@ def draft_exact_replace_policy(
         )
         _validate_expected_rule_semantics(rule)
         _validate_exact_operation(clause, rule)
+        _validate_expected_candidate(checked_baseline, [(rule, clause)])
         return ContractPolicy(
             baseline=PolicyBaseline(
                 sha256=checked_baseline.source.sha256,
@@ -190,6 +251,7 @@ def validate_policy(baseline: ContractDocument, policy: ContractPolicy) -> None:
     _validate_contract_safe_semantics(checked_policy)
     for expected_rule, clause in resolved_expected:
         _validate_exact_operation(clause, expected_rule)
+    _validate_expected_candidate(checked_baseline, resolved_expected)
 
 
 def freeze_policy(baseline: ContractDocument, policy: ContractPolicy) -> FrozenPolicy:
