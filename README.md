@@ -97,6 +97,14 @@ The interfaces use the same verdict and evidence data:
   output roots. MCP cannot approve findings or perform verified signing.
 - **Offline HTML:** create a portable report linked to the recorded facts.
 
+Python `inspect_contract()` and the MCP `inspect_contract` tool also return
+`independent_headings` and `truncated_headings`. `independent_headings` is a
+bounded, best-effort list of visible headings. It helps reviewers inspect document
+structure. Selectors and authorization still use the clause tree. Hidden DOCX
+text is excluded.
+`truncated_headings` reports when response limits shorten the heading output.
+The multi-column PDF limits below still apply.
+
 ```console
 artifactdiff --help
 artifactdiff policy --help
