@@ -11,3 +11,5 @@ __pycache__/
 /evaluation/data/raw/
 /evaluation/data/generated/
 /tmp/
+# Local private scratch; never commit
+/private/
