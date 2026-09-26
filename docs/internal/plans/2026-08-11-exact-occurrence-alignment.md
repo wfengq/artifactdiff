@@ -368,7 +368,7 @@ Record the correction-cycle base/head, strict RED output, GREEN commands and cou
 
 - [ ] **Step 5: Perform one scoped read-only review**
 
-Review the correction commit against `docs/superpowers/specs/2026-08-11-exact-occurrence-alignment-design.md`. Re-run the independent-review counterexample and inspect resource accounting, monotonic anchor validation, exact-plus-allow behavior, and public verdict semantics.
+Review the correction commit against `docs/internal/specs/2026-08-11-exact-occurrence-alignment-design.md`. Re-run the independent-review counterexample and inspect resource accounting, monotonic anchor validation, exact-plus-allow behavior, and public verdict semantics.
 
 Plan 2 completes only with:
 

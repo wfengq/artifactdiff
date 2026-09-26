@@ -1,3 +1,5 @@
+> **Superseded.** This 2026-08-03 MVP note is historical. The current product direction is the contract verification gate (2026-08-04+) and the accepted Golden Path record in `docs/plan-4.5-contract-golden-path.md`.
+
 # ArtifactDiff MVP Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

@@ -1,18 +1,17 @@
 # ArtifactDiff
 
-ArtifactDiff 是一个本地运行的合同修改核验原型。用户先指定允许修改的条款，
-系统再检查候选 DOCX 或带文字层的 PDF，给出 `PASS`、`REVIEW` 或 `FAIL`，
-并保存可校验的审查记录。目前已有合成合同端到端演示；真实合同适配仍在验证，
-扫描件和部分多栏、复杂版式尚未可靠支持。
+ArtifactDiff is a local-first prototype that checks whether a contract edit matches a
+policy approved before editing. You declare the allowed clause change; the tool inspects
+a candidate DOCX or text-based PDF and returns `PASS`, `REVIEW`, or `FAIL`, then stores
+a content-addressed Review Bundle that can be verified later.
 
-ArtifactDiff checks whether a contract edit made by a person or an AI agent matches a
-policy that was approved before editing. It combines semantic rules, protected values,
-occurrence checks, and visual evidence. The result is stored in a content-addressed
-Review Bundle that can be checked later for unexpected modification.
+ArtifactDiff 是本地运行的合同修改核验原型：先指定允许的条款修改，再检查候选 DOCX
+或带文字层的 PDF，给出 `PASS` / `REVIEW` / `FAIL`，并保存可校验的审查记录。
 
-> Project status: `0.1.0` alpha. The signed synthetic Golden Path is implemented, and
-> the repository has more than 900 automated tests. Packaging, broader real-contract
-> evaluation, and public release automation remain in progress.
+> Status: `0.1.0` alpha. The signed synthetic Golden Path is implemented, and the
+> repository has a large automated test suite. Broader real-contract evaluation and
+> public packaging remain in progress. There is no PyPI release and no demo GIF in
+> this repository.
 
 ## Verdicts
 
@@ -28,8 +27,8 @@ It is not legal approval of a contract.
 
 ## Run the synthetic Golden Path
 
-You need Python 3.11 or later and a local checkout. The demo generates synthetic
-contracts and makes no network request after the dependencies are installed.
+Requires Python 3.11+ and a local checkout. After dependencies are installed, the demo
+generates synthetic contracts and makes no network request.
 
 ```console
 python -m venv .venv
@@ -56,8 +55,8 @@ python scripts/run_contract_golden_path.py --output build/contract-golden-path-a
 
 `--approve-review` exists only for the synthetic demo. In normal use, a person approves
 a finding through `artifactdiff review` or `artifactdiff approve`. An agent cannot
-approve its own finding. The [Golden Path walkthrough](examples/contract-golden-path/README.md)
-describes the generated files and privacy boundaries.
+approve its own finding. See the
+[Golden Path walkthrough](examples/contract-golden-path/README.md).
 
 ## Verification flow
 
@@ -81,29 +80,21 @@ semantic rules, protected values, and visual evidence
               content-addressed Review Bundle
 ```
 
-The Review Bundle is the stored record. It includes the policy, comparison facts,
-verdict, evidence index, and signed events when verified assurance is enabled. The
-verifier recomputes file digests and signature claims from the bundle bytes.
+The Review Bundle stores the policy, comparison facts, verdict, evidence index, and
+signed events when verified assurance is enabled. The verifier recomputes digests and
+signature claims from the bundle bytes.
 
 ## Interfaces
 
-The interfaces use the same verdict and evidence data:
+The same verdict and evidence data are available through:
 
 - **CLI:** create, validate, and seal policies; run verification; inspect findings;
-  record human decisions; and verify or pack bundles.
+  record human decisions; verify or pack bundles.
 - **Local review desk:** inspect a bundle and sign one finding at a time. Contract files
   and private keys are not sent to browser JavaScript.
 - **MCP:** inspect, draft, validate, and run local verification from bounded input and
   output roots. MCP cannot approve findings or perform verified signing.
 - **Offline HTML:** create a portable report linked to the recorded facts.
-
-Python `inspect_contract()` and the MCP `inspect_contract` tool also return
-`independent_headings` and `truncated_headings`. `independent_headings` is a
-bounded, best-effort list of visible headings. It helps reviewers inspect document
-structure. Selectors and authorization still use the clause tree. Hidden DOCX
-text is excluded.
-`truncated_headings` reports when response limits shorten the heading output.
-The multi-column PDF limits below still apply.
 
 ```console
 artifactdiff --help
@@ -112,8 +103,8 @@ artifactdiff verify --help
 artifactdiff review path/to/review-bundle
 ```
 
-For an MCP host, configure absolute input and output roots before starting the stdio
-server. Separate multiple roots with the platform path separator.
+For an MCP host, set absolute input and output roots before starting the stdio server.
+Separate multiple roots with the platform path separator.
 
 ```text
 ARTIFACTDIFF_MCP_INPUT_ROOTS=/absolute/contracts
@@ -147,30 +138,37 @@ artifactdiff-mcp
 - MCP responses are bounded and do not return full contracts, page images, or key
   material.
 
-Read the [verification-gate design](docs/superpowers/specs/2026-08-04-artifactdiff-contract-verification-gate-design.md)
-and the [Golden Path acceptance record](docs/plan-4.5-contract-golden-path.md) for the
-trust and verdict model.
+See [SECURITY.md](SECURITY.md) and the
+[Golden Path acceptance record](docs/plan-4.5-contract-golden-path.md).
 
 ## Supported inputs and current limits
 
-The implemented paths cover:
+Implemented paths:
 
 - DOCX compared with DOCX.
 - Text-based PDF compared with text-based PDF.
 - DOCX compared with a rendered PDF when LibreOffice rendering is configured.
 - Selected English, Chinese, and bilingual contract examples.
 
-The current limits are material:
+Material limits:
 
-- ArtifactDiff does not perform OCR. A scanned PDF without extractable text produces a
-  warning and cannot receive the same text verification as a text-based PDF.
+- No OCR. A scanned PDF without extractable text cannot receive the same text
+  verification as a text-based PDF.
 - Multi-column PDFs, tables, and unusual reading orders can produce incorrect text
-  grouping. These layouts require human review and more evaluation.
-- Protected-value extraction uses deterministic patterns. It is not a legal named-entity
-  model and does not claim to recognize every contract term.
-- The end-to-end Golden Path uses synthetic contracts. Tests on selected external
-  documents do not establish production accuracy or a zero-false-pass rate.
+  grouping and need human review.
+- Protected-value extraction uses deterministic patterns, not a legal NER model.
+- The Golden Path uses synthetic contracts. Selected external-document tests do not
+  establish production accuracy or a zero-false-pass rate.
 - ArtifactDiff is an engineering prototype, not a substitute for legal review.
+
+### Inspect helper: independent headings
+
+Python `inspect_contract()` and the MCP `inspect_contract` tool may also return
+`independent_headings` and `truncated_headings`. `independent_headings` is a bounded,
+best-effort list of visible headings for reviewer inspection. Selectors and
+authorization still use the clause tree. Hidden DOCX text is excluded.
+`truncated_headings` reports when response limits shorten the heading output.
+Multi-column PDF limits above still apply.
 
 ## Development
 
@@ -179,16 +177,18 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
-The test suite includes unit, integration, tamper, CLI, MCP, review-desk, cross-format,
-and signed Golden Path coverage.
+CI already runs on GitHub Actions for pushes and pull requests to `master`
+(`.github/workflows/ci.yml`: install, ruff baseline checks, pytest).
+
+More documentation pointers: [docs/README.md](docs/README.md).
 
 ## Planned work
 
-- Publish a reproducible synthetic corpus and a measured false-pass gate.
-- Add a GitHub Action for binary-document pull request review.
-- Publish demo media and an example Review Bundle.
+- Broader real-contract evaluation and a measured false-pass gate.
+- A docs / binary-document pull-request review Action (**not implemented yet**;
+  ordinary CI already exists as noted above).
 - Publish schemas, a threat model, an SBOM, provenance, and a signed alpha release.
-- Define adapter boundaries for enterprise parsers, renderers, signing, encryption, and
+- Adapter boundaries for enterprise parsers, renderers, signing, encryption, and
   storage.
 
 The project has one narrow goal: make an agent's permitted contract edit and the

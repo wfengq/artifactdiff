@@ -5,6 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "artifactdiff"
 version = "0.1.0"
+description = "Local-first contract edit verification gate: check a DOCX/PDF candidate against a pre-approved policy and store a verifiable Review Bundle."
+readme = "README.md"
+license = "MIT"
+authors = [
+  { name = "Wei Qihang" },
+]
 requires-python = ">=3.11"
 dependencies = [
   "cryptography>=44,<47",
@@ -23,6 +29,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["beautifulsoup4>=4.12,<5", "build>=1.2", "httpx>=0.27,<1", "mypy>=1.15", "pytest>=8.3", "reportlab>=4.2", "ruff>=0.11"]
+
+[project.urls]
+Homepage = "https://github.com/wfengq/artifactdiff"
+Repository = "https://github.com/wfengq/artifactdiff"
+Issues = "https://github.com/wfengq/artifactdiff/issues"
+"Bug Tracker" = "https://github.com/wfengq/artifactdiff/issues"
 
 [project.scripts]
 artifactdiff = "artifactdiff.cli:app"
