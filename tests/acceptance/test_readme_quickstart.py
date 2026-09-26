@@ -10,7 +10,7 @@ def test_readme_explains_the_product_demo_and_current_limits() -> None:
     folded = readme.casefold()
 
     assert readme.startswith("# ArtifactDiff")
-    assert "ai agent" in folded
+    assert "local-first prototype" in folded
     assert "docx" in folded and "pdf" in folded
     assert all(outcome in readme for outcome in ("PASS", "REVIEW", "FAIL"))
     assert 'pip install -e ".[dev]"' in readme
@@ -20,7 +20,7 @@ def test_readme_explains_the_product_demo_and_current_limits() -> None:
     assert "offline" in folded and "ed25519" in folded and "review bundle" in folded
     assert "artifactdiff review" in readme
     assert "artifactdiff-mcp" in readme
-    assert "does not perform ocr" in folded
+    assert "no ocr" in folded
     assert "multi-column" in folded
     assert "not legal approval" in folded
 
