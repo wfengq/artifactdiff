@@ -1,6 +1,7 @@
 """Semantic change classification for document snapshots."""
 
 from collections import Counter
+from typing import Literal
 
 from artifactdiff.alignment import AlignedPair, align_sequences
 from artifactdiff.models import BlockRef, ContentBlock, DocumentSnapshot, SemanticChange
@@ -30,6 +31,7 @@ def _pair_is_unchanged(pair: AlignedPair[ContentBlock]) -> bool:
 def _change_from_pair(pair: AlignedPair[ContentBlock]) -> SemanticChange:
     before = pair.before
     after = pair.after
+    kind: Literal["added", "removed", "modified"]
     if before is None:
         assert after is not None
         kind = "added"
@@ -90,6 +92,7 @@ def _promote_exact_moves(changes: list[SemanticChange]) -> list[SemanticChange]:
             continue
         if change.id in moved_by_removed_id:
             added_change = moved_by_removed_id[change.id]
+            assert change.before is not None and added_change.after is not None
             promoted.append(
                 SemanticChange(
                     id=f"semantic-{change.before.block_id}-{added_change.after.block_id}",

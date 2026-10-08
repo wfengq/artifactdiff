@@ -178,7 +178,8 @@ python -m pytest -q
 ```
 
 CI already runs on GitHub Actions for pushes and pull requests to `master`
-(`.github/workflows/ci.yml`: install, ruff baseline checks, pytest).
+(`.github/workflows/ci.yml`: ruff baseline checks, `mypy --strict`, and pytest on
+Python 3.11, 3.12, and 3.13, plus a wheel build and install smoke test).
 
 More documentation pointers: [docs/README.md](docs/README.md).
 
