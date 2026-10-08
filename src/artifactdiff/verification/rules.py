@@ -30,6 +30,7 @@ from artifactdiff.verification.alignment import (
     AlignmentBudget,
     OccurrenceAnchor,
     TextSpan,
+    is_unambiguous_pure_replacement,
     prove_atomic_occurrence_alignment,
 )
 from artifactdiff.verification.facts import diff_contracts
@@ -442,11 +443,16 @@ def _expected_phase(
             if counted
             else ()
         )
-        corresponds = counted and prove_atomic_occurrence_alignment(
-            before_text,
-            after_text,
-            anchors,
-            alignment_budget,
+        corresponds = counted and (
+            is_unambiguous_pure_replacement(
+                before_text, after_text, anchors, before_value, after_value
+            )
+            or prove_atomic_occurrence_alignment(
+                before_text,
+                after_text,
+                anchors,
+                alignment_budget,
+            )
         )
         applied = counted and corresponds
         reconstructed = before_text.replace(before_value, after_value, operation.occurrences)

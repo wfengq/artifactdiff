@@ -4,6 +4,7 @@ from artifactdiff.verification.alignment import (
     AlignmentBudget,
     OccurrenceAnchor,
     TextSpan,
+    is_unambiguous_pure_replacement,
     prove_atomic_occurrence_alignment,
 )
 
@@ -116,3 +117,78 @@ def test_nfc_text_alignment_is_deterministic() -> None:
 
     assert first is True
     assert second is first
+
+
+def _all_spans(text: str, value: str) -> list[TextSpan]:
+    spans: list[TextSpan] = []
+    start = text.find(value)
+    while start >= 0:
+        spans.append(TextSpan(start=start, end=start + len(value)))
+        start = text.find(value, start + len(value))
+    return spans
+
+
+def _pure_replacement_cases() -> list[tuple[str, str, str, str, int]]:
+    """Seeded random clauses whose candidate is exactly the declared replacement."""
+    import random
+
+    rng = random.Random(20261008)
+    cases: list[tuple[str, str, str, str, int]] = []
+    while len(cases) < 3000:
+        alphabet = rng.choice(["ab", "abc", "ab ", "红绿 ", "abcd"])
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(3, 40)))
+        start = rng.randrange(len(text))
+        before_value = text[start : start + rng.randint(1, 5)]
+        after_value = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 5)))
+        occurrences = text.count(before_value)
+        if not before_value or before_value == after_value or occurrences > 3:
+            continue
+        after_text = text.replace(before_value, after_value, occurrences)
+        if after_text.count(after_value) != occurrences or before_value in after_text:
+            continue
+        cases.append((text, after_text, before_value, after_value, occurrences))
+    return cases
+
+
+def test_unambiguous_pure_replacement_implies_alignment_proof() -> None:
+    """The shortcut may only skip alignment where alignment would prove the mapping."""
+    shortcut_taken = 0
+    for (
+        before_text,
+        after_text,
+        before_value,
+        after_value,
+        occurrences,
+    ) in _pure_replacement_cases():
+        before_spans = _all_spans(before_text, before_value)
+        after_spans = _all_spans(after_text, after_value)
+        if len(before_spans) != occurrences or len(after_spans) != occurrences:
+            continue
+        anchors = tuple(
+            OccurrenceAnchor(before=b, after=a)
+            for b, a in zip(before_spans, after_spans, strict=True)
+        )
+        if is_unambiguous_pure_replacement(
+            before_text, after_text, anchors, before_value, after_value
+        ):
+            shortcut_taken += 1
+            assert prove_atomic_occurrence_alignment(
+                before_text, after_text, anchors, AlignmentBudget()
+            ), (before_text, after_text, before_value, after_value)
+    assert shortcut_taken > 2000
+
+
+def test_overlapping_replacement_position_is_not_a_pure_shortcut() -> None:
+    before_text, after_text = "babbbaa", "babbbbb"
+    anchors = (OccurrenceAnchor(_span(before_text, "baa"), _span(after_text, "bbb")),)
+    assert not is_unambiguous_pure_replacement(before_text, after_text, anchors, "baa", "bbb")
+    assert not prove_atomic_occurrence_alignment(
+        before_text, after_text, anchors, AlignmentBudget()
+    )
+
+
+def test_pure_shortcut_rejects_any_extra_change() -> None:
+    before_text = "Payment: RED; fee unchanged."
+    after_text = "Payment: BLUE; fee revised."
+    anchors = (OccurrenceAnchor(_span(before_text, "RED"), _span(after_text, "BLUE")),)
+    assert not is_unambiguous_pure_replacement(before_text, after_text, anchors, "RED", "BLUE")

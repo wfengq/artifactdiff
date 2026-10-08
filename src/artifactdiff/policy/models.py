@@ -9,6 +9,7 @@ from pydantic import (
     StrictBool,
     StrictInt,
     StrictStr,
+    field_serializer,
     field_validator,
     model_validator,
 )
@@ -67,6 +68,11 @@ class AllowRule(PolicyModel):
     kinds: frozenset[AllowKind] = Field(min_length=1)
 
     _kinds_are_text = field_validator("kinds", mode="before")(_require_text_collection)
+
+    @field_serializer("kinds", when_used="json")
+    def _sorted_kinds(self, value: frozenset[AllowKind]) -> list[str]:
+        # Set iteration order depends on PYTHONHASHSEED; sealed artifacts must not.
+        return sorted(value)
 
 
 class ProtectedTarget(StrEnum):
@@ -154,6 +160,11 @@ class ContractPolicy(PolicyModel):
     _protected_targets_are_text = field_validator("protect", mode="before")(
         _require_text_collection
     )
+
+    @field_serializer("protect", when_used="json")
+    def _sorted_protect(self, value: frozenset[ProtectedTarget]) -> list[str]:
+        # Set iteration order depends on PYTHONHASHSEED; sealed artifacts must not.
+        return sorted(item.value for item in value)
 
     @field_validator("expect", "allow", mode="before")
     @classmethod

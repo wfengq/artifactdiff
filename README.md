@@ -170,6 +170,18 @@ authorization still use the clause tree. Hidden DOCX text is excluded.
 `truncated_headings` reports when response limits shorten the heading output.
 Multi-column PDF limits above still apply.
 
+## Evaluation
+
+[`evaluation/`](evaluation/README.md) is a reproducible benchmark. It measures false
+passes (an unauthorized change judged `PASS`), false blocks (an authorized edit
+blocked) and draftability. It runs on a committed synthetic corpus, which CI gates at
+zero false passes, and on the CUAD v1 contract dataset. Both DOCX and text-layer PDF
+are covered.
+
+```console
+python -m evaluation run --source synthetic --output build/eval/synthetic
+```
+
 ## Development
 
 ```console
@@ -178,7 +190,8 @@ python -m pytest -q
 ```
 
 CI already runs on GitHub Actions for pushes and pull requests to `master`
-(`.github/workflows/ci.yml`: install, ruff baseline checks, pytest).
+(`.github/workflows/ci.yml`: ruff baseline checks, `mypy --strict`, and pytest on
+Python 3.11, 3.12, and 3.13, plus a wheel build and install smoke test).
 
 More documentation pointers: [docs/README.md](docs/README.md).
 

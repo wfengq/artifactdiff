@@ -557,6 +557,56 @@ def test_occurrence_alignment_budget_is_total_and_fails_closed() -> None:
     assert expected.approvable is False
 
 
+_LARGE_PAYMENT = f"Payment obligations\n{'A' * 1500} pay within 30 days of invoice {'B' * 1500}"
+
+
+def test_pure_declared_edit_in_clause_beyond_alignment_budget_passes() -> None:
+    baseline = _contract(_clause("before-payment", _LARGE_PAYMENT), sha="a")
+    candidate = _contract(
+        _clause("after-payment", _LARGE_PAYMENT.replace("30 days", "45 days")), sha="b"
+    )
+
+    verdict = _evaluate(baseline, candidate, _frozen(baseline, before="30 days", after="45 days"))
+
+    assert verdict.outcome is FindingOutcome.PASS
+    assert all(item.outcome is FindingOutcome.PASS for item in verdict.findings)
+
+
+def test_extra_edit_in_clause_beyond_alignment_budget_still_fails() -> None:
+    baseline = _contract(_clause("before-payment", _LARGE_PAYMENT), sha="a")
+    candidate_text = _LARGE_PAYMENT.replace("30 days", "45 days").replace("AAAA", "AAAB", 1)
+    candidate = _contract(_clause("after-payment", candidate_text), sha="b")
+
+    for allow in (False, True):
+        verdict = _evaluate(
+            baseline,
+            candidate,
+            _frozen(baseline, before="30 days", after="45 days", allow=allow),
+        )
+        expected = next(
+            item
+            for item in verdict.findings
+            if item.rule_id == "contract-safe.expected.payment-window"
+        )
+        assert verdict.outcome is FindingOutcome.FAIL
+        assert expected.outcome is FindingOutcome.FAIL
+        assert expected.approvable is False
+
+
+def test_pure_edit_with_ambiguous_replacement_position_still_fails() -> None:
+    baseline = _contract(_clause("before-payment", "Payment obligations\nbabbbaa"), sha="a")
+    candidate = _contract(_clause("after-payment", "Payment obligations\nbabbbbb"), sha="b")
+
+    verdict = _evaluate(baseline, candidate, _frozen(baseline, before="baa", after="bbb"))
+
+    expected = next(
+        item for item in verdict.findings if item.rule_id == "contract-safe.expected.payment-window"
+    )
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert expected.outcome is FindingOutcome.FAIL
+    assert expected.approvable is False
+
+
 def test_extra_edit_without_explicit_allow_fails() -> None:
     baseline = _contract(
         _clause(

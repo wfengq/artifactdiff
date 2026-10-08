@@ -1,0 +1,23 @@
+id: en-supply
+language: en
+license: CC0-1.0
+paragraphs:
+  - SUPPLY AGREEMENT
+  - Article I Parties
+  - Contoso Corporation (the Buyer) and Fabrikam LLC (the Supplier) sign this agreement on August 4, 2026.
+  - Article II Delivery
+  - The Supplier shall deliver the Goods within 14 days after each purchase order. Each order may contain at most 500 units.
+  - Article III Price
+  - The total price is $48,000 for the initial term. A volume discount of 2% applies to orders above the forecast.
+  - Article IV Warranty
+  - The warranty period is 18 months from delivery. The Buyer may reject defective Goods within 10 days of inspection.
+  - Article V Exclusivity
+  - The Supplier shall not sell the Goods to competitors of the Buyer. The Supplier shall keep accurate production records.
+  - Article VI General Terms
+  - Notices are effective when delivered in writing.
+edit:
+  before: 14 days
+  after: 29 days
+  clause_label: article ii
+  heading: Delivery
+  anchor: deliver the Goods within

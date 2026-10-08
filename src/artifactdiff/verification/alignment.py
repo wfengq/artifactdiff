@@ -72,6 +72,40 @@ def _valid_anchors(
     return True
 
 
+def is_unambiguous_pure_replacement(
+    before_text: str,
+    after_text: str,
+    anchors: tuple[OccurrenceAnchor, ...],
+    before_value: str,
+    after_value: str,
+) -> bool:
+    """Return true when the candidate is exactly the declared replacement, unambiguously.
+
+    The candidate must equal the baseline with every anchored ``before`` span replaced,
+    and each candidate ``after`` span must sit exactly where that replacement lands.
+    Every minimum-cost alignment then uses every anchor, so the proof is decided
+    without spending the alignment budget. Any other edit, or an ``after`` span that
+    could be read at a shifted position, falls back to the full alignment proof.
+    """
+    if not anchors or not _valid_anchors(before_text, after_text, anchors):
+        return False
+    delta = len(after_value) - len(before_value)
+    pieces: list[str] = []
+    cursor = 0
+    for index, anchor in enumerate(anchors):
+        if before_text[anchor.before.start : anchor.before.end] != before_value:
+            return False
+        if after_text[anchor.after.start : anchor.after.end] != after_value:
+            return False
+        if anchor.after.start != anchor.before.start + index * delta:
+            return False
+        pieces.append(before_text[cursor : anchor.before.start])
+        pieces.append(after_value)
+        cursor = anchor.before.end
+    pieces.append(before_text[cursor:])
+    return "".join(pieces) == after_text
+
+
 def prove_atomic_occurrence_alignment(
     before_text: str,
     after_text: str,
