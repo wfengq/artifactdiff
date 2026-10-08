@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from artifactdiff import inspect_contract
 from evaluation.models import AuthorizedEdit, DraftFailure, Format, SourceContract
 from evaluation.render import render_docx
@@ -99,3 +101,28 @@ def test_prepare_drafts_policies_for_nested_clauses(tmp_path: Path) -> None:
     for fmt in Format:
         result = prepare(_contract(*HIERARCHICAL), fmt, tmp_path / fmt.value)
         assert isinstance(result, PreparedContract), result
+
+
+def test_money_target_needs_a_right_boundary(tmp_path: Path) -> None:
+    contract = _contract("The nominal value is $0.001 per share under this agreement.")
+    assert choose_edit(contract, _clauses(tmp_path, contract)) == "no-unique-target"
+
+
+def test_money_target_excludes_trailing_comma(tmp_path: Path) -> None:
+    contract = _contract("The Customer shall pay a setup fee of $500, payable on signature.")
+    edit = choose_edit(contract, _clauses(tmp_path, contract))
+    assert isinstance(edit, AuthorizedEdit)
+    assert (edit.before, edit.after) == ("$500", "$1500")
+
+
+@pytest.mark.parametrize(
+    "paragraph",
+    [
+        "Licensee shall pay fifty percent (50%) of all net revenue to Licensor.",
+        "The Customer shall pay a fee of $5,000 (Five Thousand Dollars) on signature.",
+        "Either party may terminate on 30 days (thirty days) prior written notice.",
+    ],
+)
+def test_restated_numbers_are_not_edit_targets(tmp_path: Path, paragraph: str) -> None:
+    contract = _contract(paragraph)
+    assert choose_edit(contract, _clauses(tmp_path, contract)) == "no-unique-target"

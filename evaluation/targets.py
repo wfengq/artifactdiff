@@ -19,7 +19,7 @@ from evaluation.render import render
 RULE_ID = "authorized"
 _DURATION = re.compile(r"\b(\d+) (days|months|years)\b")
 _PERCENTAGE = re.compile(r"\b(\d+(?:\.\d+)?)%")
-_MONEY = re.compile(r"\$\s?(\d[\d,]*)")
+_MONEY = re.compile(r"\$\s?(\d{1,3}(?:,\d{3})+|\d+)(?![.,]?\d)")
 _ANCHOR_WORDS = 6
 _MIN_PRECEDING_WORDS = 3
 
@@ -48,6 +48,17 @@ def _shifted(pattern: re.Pattern[str], match: re.Match[str]) -> str:
         new = f"{value:,}" if "," in number else str(value)
     start, end = match.span(1)
     return text[: start - match.start()] + new + text[end - match.start() :]
+
+
+def _restated(clause_text: str, match: re.Match[str]) -> bool:
+    """True for numbers restated in words, e.g. ``fifty percent (50%)`` or ``$5 (Five)``.
+
+    Editing only the numeral would contradict the words, so the "authorized" edit
+    would itself be inconsistent and its block could not be attributed to the gate.
+    """
+    preceding = clause_text[: match.start()].rstrip()
+    following = clause_text[match.end() :].lstrip()
+    return preceding.endswith("(") or following.startswith("(")
 
 
 def _anchor(clause_text: str, match: re.Match[str]) -> str:
@@ -98,6 +109,8 @@ def choose_edit(
         normalized_clause = normalize_text(str(clause["normalized_text"]))
         for pattern in (_DURATION, _PERCENTAGE, _MONEY):
             for match in pattern.finditer(clause_text):
+                if _restated(clause_text, match):
+                    continue
                 before = match.group()
                 if document.count(before) != 1 or clause_text.count(before) != 1:
                     continue
