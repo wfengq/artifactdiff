@@ -124,3 +124,148 @@ def test_chinese_date_components_are_not_duplicated_as_durations(evidence: Evide
     assert [(item.kind.value, item.normalized_value) for item in entities] == [
         ("date", "2026-09-21")
     ]
+
+
+def _observed(text: str, evidence: EvidenceRef) -> set[tuple[str, str]]:
+    return {
+        (item.kind.value, item.normalized_value)
+        for item in extract_entities(text, "clause-gap", evidence)
+    }
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("合同总价为100万元。", {("money", "1000000"), ("currency", "CNY")}),
+        ("合同总价为1.5亿元。", {("money", "150000000.0"), ("currency", "CNY")}),
+        ("服务费为500万美元。", {("money", "5000000"), ("currency", "USD")}),
+        ("押金为20万港元。", {("money", "200000"), ("currency", "HKD")}),
+    ],
+)
+def test_extract_entities_reads_chinese_unit_money_without_rmb_prefix(
+    evidence: EvidenceRef, text: str, expected: set[tuple[str, str]]
+) -> None:
+    assert expected <= _observed(text, evidence)
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("合同总价为人民币壹佰万元整。", "1000000"),
+        ("合同总价为壹拾贰万叁仟肆佰伍拾陆元柒角捌分。", "123456.78"),
+        ("合同总价为人民币壹亿贰仟万元整。", "120000000"),
+        ("合同总价为人民币壹佰零伍元整。", "105"),
+    ],
+)
+def test_extract_entities_reads_uppercase_chinese_money(
+    evidence: EvidenceRef, text: str, value: str
+) -> None:
+    observed = _observed(text, evidence)
+    assert ("money", value) in observed
+    assert ("currency", "CNY") in observed
+
+
+def test_uppercase_and_numeric_amounts_are_both_protected(evidence: EvidenceRef) -> None:
+    entities = extract_entities(
+        "合同总价为人民币100万元（大写：人民币壹佰万元整）。", "clause-gap", evidence
+    )
+    money = [item.normalized_value for item in entities if item.kind.value == "money"]
+    assert money == ["1000000", "1000000"]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Price: GBP 1,000,000.", {("money", "1000000"), ("currency", "GBP")}),
+        ("Deposit: HKD 500.", {("money", "500"), ("currency", "HKD")}),
+        ("Fee: JPY 500.", {("money", "500"), ("currency", "JPY")}),
+        ("Fee: £250.", {("money", "250"), ("currency", "GBP")}),
+        ("Deposit: HK$ 500.", {("money", "500"), ("currency", "HKD")}),
+    ],
+)
+def test_extract_entities_reads_additional_currencies(
+    evidence: EvidenceRef, text: str, expected: set[tuple[str, str]]
+) -> None:
+    assert expected <= _observed(text, evidence)
+
+
+def test_hong_kong_dollar_symbol_is_not_read_as_us_dollars(evidence: EvidenceRef) -> None:
+    assert ("currency", "USD") not in _observed("Deposit: HK$ 500.", evidence)
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("Fee: USD 1 million.", "1000000"),
+        ("Fee: USD 2.5 billion.", "2500000000.0"),
+        ("Fee: 3 thousand EUR.", "3000"),
+    ],
+)
+def test_extract_entities_applies_english_scale_words_to_money(
+    evidence: EvidenceRef, text: str, value: str
+) -> None:
+    money = {v for kind, v in _observed(text, evidence) if kind == "money"}
+    assert money == {value}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Effective Date: October 8, 2026.",
+        "Effective Date: Oct. 8, 2026.",
+        "Effective Date: 8 October 2026.",
+        "Effective Date: 8th October, 2026.",
+        "Effective Date: Sept 8 2026.",
+    ],
+)
+def test_extract_entities_reads_english_month_name_dates(
+    evidence: EvidenceRef, text: str
+) -> None:
+    assert ("date", "2026-10-08" if "Sept" not in text else "2026-09-08") in _observed(
+        text, evidence
+    )
+
+
+def test_invalid_english_month_name_date_is_ignored(evidence: EvidenceRef) -> None:
+    assert not any(kind == "date" for kind, _ in _observed("February 30, 2026", evidence))
+
+
+@pytest.mark.parametrize("text", ["Term: thirty (30) days.", "付款期限为三十（30）日内。"])
+def test_extract_entities_reads_parenthesized_numeric_duration(
+    evidence: EvidenceRef, text: str
+) -> None:
+    assert ("duration", "30 day") in _observed(text, evidence)
+
+
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        ("付款期限为三十日内。", "30 day"),
+        ("保修期为两年。", "2 year"),
+        ("服务期为十二个月。", "12 month"),
+        ("甲方应于十五天内付款。", "15 day"),
+    ],
+)
+def test_extract_entities_reads_chinese_numeral_durations(
+    evidence: EvidenceRef, text: str, value: str
+) -> None:
+    assert ("duration", value) in _observed(text, evidence)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "本合同于二〇二六年签订。",
+        "本合同于二〇〇一年签订。",
+        "交付时间为十二月。",
+        "十月八日",
+        "自第三年起",
+        "自第十五年起",
+        "双方应于同一天签署。",
+        "每一年度结算一次。",
+    ],
+)
+def test_chinese_numeral_years_months_and_days_are_not_durations(
+    evidence: EvidenceRef, text: str
+) -> None:
+    assert not any(kind == "duration" for kind, _ in _observed(text, evidence))
