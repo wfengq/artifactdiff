@@ -57,6 +57,36 @@ def _anchor(clause_text: str, match: re.Match[str]) -> str:
     return " ".join(clause_text[match.end() :].split()[:_ANCHOR_WORDS])
 
 
+def _ancestors(clause: dict[str, object]) -> tuple[str, ...]:
+    path = clause.get("ancestor_path") or ()
+    assert isinstance(path, (list, tuple))
+    return tuple(str(item) for item in path)
+
+
+def _exact_key(clause: dict[str, object]) -> tuple[str, str, tuple[str, ...]]:
+    label = clause["label"]
+    assert isinstance(label, dict)
+    return (
+        normalize_text(str(label["normalized"])),
+        normalize_text(str(clause["heading"])),
+        tuple(normalize_text(item) for item in _ancestors(clause)),
+    )
+
+
+def _exact_matches(
+    clauses: list[dict[str, object]], target: dict[str, object], anchor: str
+) -> int:
+    """Count clauses the exact selector would match, mirroring ``resolve_baseline``."""
+    key = _exact_key(target)
+    needle = normalize_text(anchor)
+    return sum(
+        1
+        for clause in clauses
+        if _exact_key(clause) == key
+        and normalize_text(str(clause["normalized_text"])).count(needle) == 1
+    )
+
+
 def choose_edit(
     contract: SourceContract, clauses: list[dict[str, object]]
 ) -> AuthorizedEdit | str:
@@ -78,6 +108,8 @@ def choose_edit(
                 anchor = _anchor(clause_text, match)
                 if not anchor or normalized_clause.count(normalize_text(anchor)) != 1:
                     continue
+                if _exact_matches(clauses, clause, anchor) != 1:
+                    continue
                 label = clause["label"]
                 assert isinstance(label, dict)
                 return AuthorizedEdit(
@@ -89,6 +121,7 @@ def choose_edit(
                     clause_label=str(label["normalized"]),
                     heading=str(clause["heading"]),
                     anchor=anchor,
+                    ancestor_path=_ancestors(clause),
                 )
     return "no-unique-anchor" if unique_target_found else "no-unique-target"
 
@@ -114,7 +147,10 @@ def prepare(
         policy = application.draft_policy(
             baseline,
             ClauseSelector(
-                clause_label=chosen.clause_label, heading=chosen.heading, anchor=chosen.anchor
+                clause_label=chosen.clause_label,
+                heading=chosen.heading,
+                ancestor_path=chosen.ancestor_path,
+                anchor=chosen.anchor,
             ),
             before=chosen.before,
             after=chosen.after,

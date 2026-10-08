@@ -79,3 +79,23 @@ def test_prepare_synthetic_seed_produces_sealed_policy(tmp_path: Path) -> None:
             assert result.baseline_path.suffix == f".{fmt.value}"
             assert 0 < result.edited_clause_chars < 1000
             assert result.baseline_clause_count >= 6
+
+
+HIERARCHICAL = (
+    "ARTICLE I FEES",
+    "1.1 Payment. The Customer shall pay each undisputed invoice within 30 days of receipt.",
+    "1.2 Late Fees. Late amounts accrue interest monthly.",
+)
+
+
+def test_choose_edit_carries_the_clause_ancestor_path(tmp_path: Path) -> None:
+    contract = _contract(*HIERARCHICAL)
+    edit = choose_edit(contract, _clauses(tmp_path, contract))
+    assert isinstance(edit, AuthorizedEdit)
+    assert (edit.clause_label, edit.ancestor_path) == ("1.1", ("FEES",))
+
+
+def test_prepare_drafts_policies_for_nested_clauses(tmp_path: Path) -> None:
+    for fmt in Format:
+        result = prepare(_contract(*HIERARCHICAL), fmt, tmp_path / fmt.value)
+        assert isinstance(result, PreparedContract), result

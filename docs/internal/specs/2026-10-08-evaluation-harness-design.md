@@ -138,9 +138,12 @@ deterministically:
 4. Build the selector:
    - `clause_label` = the clause's `label.normalized`;
    - `heading` = the clause heading;
+   - `ancestor_path` = the clause's ancestor path, because exact selector resolution
+     requires it to match;
    - `anchor` = the up to six words before the target inside the clause. If fewer
      than three words precede it, use the words after it. The anchor must be unique
-     in the clause.
+     in the clause. Exactly one clause in the document may match the label, heading,
+     ancestor path and anchor; otherwise the next candidate is tried.
 5. Call `draft_policy`, then `seal_policy` with no signer. If either raises, record
    the contract as not draftable with the exception type and message, and generate
    no cases for it.

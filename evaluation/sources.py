@@ -63,6 +63,7 @@ def _load_seed(path: Path) -> SourceContract:
             clause_label=str(edit["clause_label"]),
             heading=str(edit["heading"]),
             anchor=str(edit["anchor"]),
+            ancestor_path=tuple(str(item) for item in edit.get("ancestor_path", ())),
         ),
     )
 

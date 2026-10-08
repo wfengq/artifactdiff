@@ -32,6 +32,7 @@ class AuthorizedEdit:
     clause_label: str
     heading: str
     anchor: str
+    ancestor_path: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
