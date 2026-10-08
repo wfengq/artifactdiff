@@ -34,3 +34,30 @@ def test_cli_synthetic_run_writes_report(
     assert summary["metadata"]["source"] == "synthetic"
     assert summary["metadata"]["formats"] == ["docx"]
     assert (output / "report.md").is_file() and (output / "results.jsonl").is_file()
+
+
+def test_cli_exits_nonzero_when_cases_errored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import evaluation.__main__ as cli
+    from evaluation.models import CaseKey, CaseResult, Expectation
+    from evaluation.runner import RunResult
+
+    errored = CaseResult(
+        key=CaseKey("synthetic", "en-services", "docx", "money_change"),
+        expectation=Expectation.BLOCK,
+        text_verdict=None,
+        raw_outcome=None,
+        nonpass_rule_ids=(),
+        edited_clause_chars=100,
+        baseline_clause_count=6,
+        duration_s=1.0,
+        error="timeout after 1s",
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_cases",
+        lambda *args, **kwargs: RunResult([errored], [], [], 0),
+    )
+    assert main(["run", "--source", "synthetic", "--output", str(tmp_path / "o")]) == 1
+    assert "errors: 1" in capsys.readouterr().out

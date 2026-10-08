@@ -210,9 +210,13 @@ def write_report(output: Path, run: RunResult, metadata: RunMetadata) -> None:
 def headline(summary: Mapping[str, Any]) -> str:
     overall = summary["false_pass"]["overall"]
     lo, hi = overall["ci95"]
+    draftability = summary["draftability"]
     return (
         f"False passes: {overall['count']}/{overall['total']} "
-        f"({overall['rate']:.2%}, 95% CI {lo:.2%}–{hi:.2%})"
+        f"({overall['rate']:.2%}, 95% CI {lo:.2%}–{hi:.2%}); "
+        f"errors: {summary['counts']['errors']}; "
+        f"not draftable: {draftability['total'] - draftability['draftable']}"
+        f"/{draftability['total']}"
     )
 
 

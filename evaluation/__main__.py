@@ -94,9 +94,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         options={"visual": False, "case_timeout": arguments.case_timeout},
     )
     write_report(output, run, metadata)
-    print(headline(build_summary(run, metadata)))
+    summary = build_summary(run, metadata)
+    print(headline(summary))
     print(output / "report.md")
-    return 0
+    # Errors leave the false-pass denominator, so a run with errors must not look clean.
+    return 1 if summary["counts"]["errors"] else 0  # type: ignore[index]
 
 
 if __name__ == "__main__":

@@ -37,6 +37,9 @@ python -m evaluation run --source cuad --limit 100 --output build/eval/cuad-100
 
 `fetch-cuad --archive PATH` reuses a `CUAD_v1.zip` you already downloaded.
 
+`run` exits with status 1 when any case errored or timed out. Errors are excluded from
+the false-pass denominator, so a run with errors must not be read as clean.
+
 Each run writes three files to `--output`:
 
 - `results.jsonl`: one row per case;

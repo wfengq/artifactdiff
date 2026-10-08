@@ -154,3 +154,12 @@ def test_report_contains_no_contract_text_and_cuad_attribution(tmp_path: Path) -
 
     write_report(tmp_path / "s", RUN, _metadata("synthetic"))
     assert CUAD_ATTRIBUTION not in (tmp_path / "s" / "report.md").read_text(encoding="utf-8")
+
+
+def test_headline_reports_errors_and_draft_failures() -> None:
+    from evaluation.report import headline
+
+    line = headline(build_summary(RUN, _metadata()))
+    assert line.startswith("False passes: 1/3 (33.33%")
+    assert "errors: 1" in line
+    assert "not draftable: 1/4" in line
