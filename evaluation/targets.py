@@ -93,7 +93,9 @@ def choose_edit(
     return "no-unique-anchor" if unique_target_found else "no-unique-target"
 
 
-def prepare(contract: SourceContract, fmt: Format, workdir: Path) -> PreparedContract | DraftFailure:
+def prepare(
+    contract: SourceContract, fmt: Format, workdir: Path
+) -> PreparedContract | DraftFailure:
     """Render the baseline, choose the edit, then draft and seal its policy."""
 
     def failure(reason: str) -> DraftFailure:
