@@ -593,6 +593,25 @@ def test_extra_edit_in_clause_beyond_alignment_budget_still_fails() -> None:
         assert expected.approvable is False
 
 
+def test_pure_multi_occurrence_edit_with_length_change_in_large_clause_passes() -> None:
+    text = (
+        f"Payment obligations\n{'A' * 1500} first notice by courier, "
+        f"{'B' * 1500} Payment obligations: second notice by courier."
+    )
+    baseline = _contract(_clause("before-payment", text), sha="a")
+    candidate = _contract(
+        _clause("after-payment", text.replace("courier", "registered mail")), sha="b"
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="courier", after="registered mail", occurrences=2),
+    )
+
+    assert verdict.outcome is FindingOutcome.PASS
+
+
 def test_pure_edit_with_ambiguous_replacement_position_still_fails() -> None:
     baseline = _contract(_clause("before-payment", "Payment obligations\nbabbbaa"), sha="a")
     candidate = _contract(_clause("after-payment", "Payment obligations\nbabbbbb"), sha="b")
