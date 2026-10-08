@@ -119,7 +119,6 @@ def test_nfc_text_alignment_is_deterministic() -> None:
     assert second is first
 
 
-
 def _all_spans(text: str, value: str) -> list[TextSpan]:
     spans: list[TextSpan] = []
     start = text.find(value)
@@ -154,9 +153,13 @@ def _pure_replacement_cases() -> list[tuple[str, str, str, str, int]]:
 def test_unambiguous_pure_replacement_implies_alignment_proof() -> None:
     """The shortcut may only skip alignment where alignment would prove the mapping."""
     shortcut_taken = 0
-    for before_text, after_text, before_value, after_value, occurrences in (
-        _pure_replacement_cases()
-    ):
+    for (
+        before_text,
+        after_text,
+        before_value,
+        after_value,
+        occurrences,
+    ) in _pure_replacement_cases():
         before_spans = _all_spans(before_text, before_value)
         after_spans = _all_spans(after_text, after_value)
         if len(before_spans) != occurrences or len(after_spans) != occurrences:

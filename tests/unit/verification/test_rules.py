@@ -557,9 +557,7 @@ def test_occurrence_alignment_budget_is_total_and_fails_closed() -> None:
     assert expected.approvable is False
 
 
-_LARGE_PAYMENT = (
-    f"Payment obligations\n{'A' * 1500} pay within 30 days of invoice {'B' * 1500}"
-)
+_LARGE_PAYMENT = f"Payment obligations\n{'A' * 1500} pay within 30 days of invoice {'B' * 1500}"
 
 
 def test_pure_declared_edit_in_clause_beyond_alignment_budget_passes() -> None:
@@ -601,7 +599,12 @@ def test_pure_edit_with_ambiguous_replacement_position_still_fails() -> None:
 
     verdict = _evaluate(baseline, candidate, _frozen(baseline, before="baa", after="bbb"))
 
+    expected = next(
+        item for item in verdict.findings if item.rule_id == "contract-safe.expected.payment-window"
+    )
     assert verdict.outcome is FindingOutcome.FAIL
+    assert expected.outcome is FindingOutcome.FAIL
+    assert expected.approvable is False
 
 
 def test_extra_edit_without_explicit_allow_fails() -> None:
