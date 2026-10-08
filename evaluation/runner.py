@@ -93,7 +93,7 @@ def run_cases(
     case_fn: Callable[[CaseJob], CaseResult] | None = None,
 ) -> RunResult:
     function = case_fn or execute_case
-    pool = multiprocessing.Pool(max(1, workers))
+    pool = _new_pool(workers)
     try:
         prepared, draft_failures = _prepare_all(pool, contracts, formats, case_timeout, workdir)
         jobs: list[CaseJob] = []
@@ -127,6 +127,15 @@ def run_cases(
         not_applicable=sorted(not_applicable),
         pdf_replacements=sum(p.pdf_replacements for p in prepared if p.format is Format.PDF),
     )
+
+
+# Spawned workers get independent hash seeds, so a policy sealed in one worker is
+# verified in another - the same cross-process path a CLI user takes.
+START_METHOD = "spawn"
+
+
+def _new_pool(workers: int) -> multiprocessing.pool.Pool:
+    return multiprocessing.get_context(START_METHOD).Pool(max(1, workers))
 
 
 def _prepare_all(
