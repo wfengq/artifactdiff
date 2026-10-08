@@ -124,11 +124,45 @@ def _pair_clauses(
     pairs.extend(fingerprint_pairs)
     paired_before = {before for before, _ in fingerprint_pairs}
     paired_after = {after for _, after in fingerprint_pairs}
+    before_remaining = [index for index in before_remaining if index not in paired_before]
+    after_remaining = [index for index in after_remaining if index not in paired_after]
+
+    # Clauses without a separate heading use their first sentence as heading, so an
+    # edit there changes both identity and fingerprint. A label (with its ancestors)
+    # that is unique on both sides still identifies the clause; the pair is then
+    # reported as modified and must be explained like any other change.
+    label_pairs = _unique_pairs(
+        [index for index in before_remaining if baseline.clauses[index].label.normalized],
+        [index for index in after_remaining if candidate.clauses[index].label.normalized],
+        baseline.clauses,
+        candidate.clauses,
+        _label_key,
+    )
+    label_pairs = [
+        (before, after)
+        for before, after in label_pairs
+        if _label_is_unique(baseline, before) and _label_is_unique(candidate, after)
+    ]
+    pairs.extend(label_pairs)
+    paired_before = {before for before, _ in label_pairs}
+    paired_after = {after for _, after in label_pairs}
     return (
         pairs,
         [index for index in before_remaining if index not in paired_before],
         [index for index in after_remaining if index not in paired_after],
     )
+
+
+def _label_key(clause: ContractClause) -> tuple[str, tuple[str, ...]]:
+    return (
+        normalize_text(clause.label.normalized),
+        tuple(normalize_text(item) for item in clause.ancestor_path),
+    )
+
+
+def _label_is_unique(document: ContractDocument, index: int) -> bool:
+    key = _label_key(document.clauses[index])
+    return sum(1 for clause in document.clauses if _label_key(clause) == key) == 1
 
 
 def _entity_counter(entities: Iterable[ProtectedEntity]) -> Counter[tuple[EntityKind, str]]:

@@ -651,6 +651,45 @@ def test_whitespace_only_change_elsewhere_still_passes() -> None:
     assert verdict.outcome is FindingOutcome.PASS
 
 
+_HEADING_B = "Payment obligations: the Customer shall pay within 30 days"
+
+
+def _heading_clause(clause_id: str, heading: str, label: str = "3.3") -> ContractClause:
+    # Decimal clauses without a separate heading use their first sentence as heading.
+    return _clause(
+        clause_id, f"{label} {heading}. Late amounts accrue interest.", label=label, heading=heading
+    )
+
+
+def test_edit_inside_a_sentence_used_as_heading_pairs_as_modified() -> None:
+    baseline = _contract(_heading_clause("before-payment", _HEADING_B), sha="a")
+    candidate = _contract(
+        _heading_clause("after-payment", _HEADING_B.replace("30 days", "45 days")), sha="b"
+    )
+
+    verdict = _evaluate(baseline, candidate, _frozen(baseline, before="30 days", after="45 days"))
+
+    assert verdict.outcome is FindingOutcome.PASS
+
+
+def test_label_pairing_requires_a_unique_label() -> None:
+    other = "Other obligations: the Supplier shall deliver promptly"
+    baseline = _contract(
+        _heading_clause("before-payment", _HEADING_B),
+        _heading_clause("before-other", other),
+        sha="a",
+    )
+    candidate = _contract(
+        _heading_clause("after-payment", _HEADING_B.replace("30 days", "45 days")),
+        _heading_clause("after-other", other.replace("promptly", "late")),
+        sha="b",
+    )
+
+    verdict = _evaluate(baseline, candidate, _frozen(baseline, before="30 days", after="45 days"))
+
+    assert verdict.outcome is FindingOutcome.FAIL
+
+
 def test_extra_edit_without_explicit_allow_fails() -> None:
     baseline = _contract(
         _clause(
