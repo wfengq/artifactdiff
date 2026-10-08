@@ -45,7 +45,7 @@ Non-goals:
 **Document text.** `"\n".join(clause.text for clause in document.clauses)`. A probe of the
 analyzer confirmed that every body block lands in exactly one clause, including the preface
 before the first heading, tables and signature paragraphs. Headers and footers live only in
-`protected_regions` and are compared by fingerprint (§4, condition 4).
+`protected_regions` and are compared by fingerprint (§4, condition 5).
 
 **Authorized document text.** The baseline document text with each expected rule's anchored
 `before` spans replaced by `after`. Spans come from the existing expected phase: the baseline
@@ -63,10 +63,22 @@ branch) is applied to both the authorized document text and the candidate docume
    selector resolves to exactly one clause, and its `before` occurs exactly `occurrences` times
    in that clause (the existing `counted` conditions on the baseline side).
 2. **Spans.** No two declared spans overlap in the baseline document.
-3. **Body text.** `comparison_text(authorized) == comparison_text(candidate document text)`.
-4. **Protected regions.** The multiset of protected-region fingerprints is identical on both
+3. **Unambiguous positions.** Build the authorized document text and record the region where
+   each `after` value was inserted. Search the authorized text for `after` at every start index,
+   overlapping matches included. Every occurrence that overlaps an inserted region must coincide
+   with that region exactly. Also, no occurrence of `before` may overlap an inserted region,
+   which means the replacement does not recreate the original text. If either check fails, the
+   document is not pure.
+
+   Example: in `babbbaa`, replacing `baa` with `bbb` gives `babbbbb`. There `bbb` is also found
+   at index 2, which overlaps the inserted region at 4–6 without coinciding with it, so the
+   document is not pure. The clause engine (DP) then rejects it, as it does today. This keeps
+   the occurrence-identity invariant of the 2026-08-11 design at the document level. The
+   reviewer decided on 2026-10-08 that position-ambiguous replacements must not pass.
+4. **Body text.** `comparison_text(authorized) == comparison_text(candidate document text)`.
+5. **Protected regions.** The multiset of protected-region fingerprints is identical on both
    sides. Region fingerprints are now case-sensitive.
-5. **Features.** The multiset of document-feature fingerprints is identical on both sides:
+6. **Features.** The multiset of document-feature fingerprints is identical on both sides:
    comments, tracked revisions, hidden text and links.
 
 When `document_pure` holds, the candidate is exactly what the policy authorizes and nothing
@@ -81,7 +93,7 @@ else. The only freedom left is whitespace.
 - Each expected rule is treated as applied and exact: one PASS finding per rule, with the same
   rule ID as today. The clause-level DP and pairing are not consulted for authorization.
 - `contract-safe.unexplained-clause`, `contract-safe.unresolved-clause` and
-  `contract-safe.protected.*` entity findings are not emitted. By condition 3, every body change
+  `contract-safe.protected.*` entity findings are not emitted. By condition 4, every body change
   lies inside a declared span, and the existing semantics already authorize entity changes
   inside exact declared spans.
 - Region, feature, metadata and visual rules run unchanged. The visual "explained envelope"
@@ -103,11 +115,10 @@ applies:
 - **Pure path.** The candidate's body text equals the authorized text up to whitespace, and the
   protected regions and features are identical. Any change the policy did not declare would
   break one of these three equalities.
-- **Occurrence ambiguity.** The clause-level design required proving which candidate span
-  corresponds to which baseline span, because other edits could coexist. Under condition 3 no
-  other edits exist, and the final document is fully determined by the policy. The `babbbaa`
-  position ambiguity therefore cannot let an unauthorized edit through: the result is
-  byte-identical (up to whitespace) to the authorized document.
+- **Occurrence ambiguity.** Even when the final text matches, the gate still requires that each
+  declared `after` value can be read only at the position where it was inserted (condition 3).
+  This mirrors the clause-level invariant: every pure match accepted here is one the DP would
+  also accept. Position-ambiguous cases, such as `babbbaa`, fall back to the clause engine.
 - **Veto path.** It can only turn PASS into FAIL, never the reverse.
 
 ## 7. Testing
@@ -126,6 +137,11 @@ applies:
   but a residual exists ends in FAIL with `contract-safe.document.residual`. One way to build it
   is a candidate clause whose text differs while the facts list no clause change.
 - Whitespace-only differences across the whole document still pass.
+- Position ambiguity: `babbbaa` with `baa → bbb` as the only change is not pure and still
+  FAILs.
+- A property test checks that whenever the document-level pure condition holds for a
+  single-clause document, the clause-level DP proof also succeeds. It reuses the generator from
+  `test_occurrence_alignment.py`.
 
 **Existing suite:** all of it passes unchanged, which shows the veto never fires on today's
 correct inputs.
