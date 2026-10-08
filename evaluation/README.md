@@ -78,6 +78,11 @@ the outcome after dropping that one finding.
 - **False pass**: a case that should be blocked gets a text verdict of `pass`. Failing
   that way can only overstate passes, never hide one. Rates come with Wilson 95%
   intervals.
+- **False pass where the authorized edit passed**: the same rate, restricted to the
+  contract×format pairs whose `authorized` case was accepted. When the gate blocks the
+  authorized edit, it blocks every candidate of that pair wholesale, so those cases say
+  nothing about telling edits apart. This conditional rate is the one that measures
+  discrimination.
 - **Accepted**: the `authorized` case gets a text verdict of `pass`. Any other
   verdict is a false block. Its remaining rule IDs are counted under "Why authorized
   edits were blocked", and also bucketed by the length of the edited clause.

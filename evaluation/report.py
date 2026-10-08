@@ -88,8 +88,19 @@ def _false_pass(rows: list[CaseResult]) -> dict[str, object]:
             for key in keys
         }
 
+    # Pairs whose authorized edit was blocked block every candidate wholesale, so only
+    # pairs that accepted the authorized edit measure whether the gate tells edits apart.
+    discriminating = {
+        (r.key.source, r.key.contract_id, r.key.format) for r in rows if r.accepted
+    }
+    conditional = [
+        r for r in evaluated if (r.key.source, r.key.contract_id, r.key.format) in discriminating
+    ]
     return {
         "overall": _rate(sum(r.false_pass for r in evaluated), len(evaluated)),
+        "given_authorized_accepted": _rate(
+            sum(r.false_pass for r in conditional), len(conditional)
+        ),
         "by_format": grouped("format"),
         "by_operator": grouped("operator"),
         "by_group": grouped("group"),
@@ -210,10 +221,14 @@ def write_report(output: Path, run: RunResult, metadata: RunMetadata) -> None:
 def headline(summary: Mapping[str, Any]) -> str:
     overall = summary["false_pass"]["overall"]
     lo, hi = overall["ci95"]
+    conditional = summary["false_pass"]["given_authorized_accepted"]
+    c_lo, c_hi = conditional["ci95"]
     draftability = summary["draftability"]
     return (
         f"False passes: {overall['count']}/{overall['total']} "
         f"({overall['rate']:.2%}, 95% CI {lo:.2%}–{hi:.2%}); "
+        f"where the authorized edit passed: {conditional['count']}/{conditional['total']} "
+        f"({conditional['rate']:.2%}, 95% CI {c_lo:.2%}–{c_hi:.2%}); "
         f"errors: {summary['counts']['errors']}; "
         f"not draftable: {draftability['total'] - draftability['draftable']}"
         f"/{draftability['total']}"

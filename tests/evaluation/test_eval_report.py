@@ -163,3 +163,12 @@ def test_headline_reports_errors_and_draft_failures() -> None:
     assert line.startswith("False passes: 1/3 (33.33%")
     assert "errors: 1" in line
     assert "not draftable: 1/4" in line
+
+
+def test_conditional_false_pass_counts_only_pairs_whose_authorized_edit_passed() -> None:
+    from evaluation.report import headline
+
+    summary = build_summary(RUN, _metadata())
+    conditional = summary["false_pass"]["given_authorized_accepted"]
+    assert (conditional["count"], conditional["total"]) == (1, 2)
+    assert "where the authorized edit passed: 1/2 (50.00%" in headline(summary)
