@@ -118,9 +118,11 @@ source contract (paragraph list)
   - English uses Helvetica. CUAD characters outside Latin-1 are replaced
     deterministically, identically in baseline and candidate, and the count of
     replacements is recorded.
-  - Chinese uses the bundled subset font `tests/assets/fonts/ArtifactDiffContractCJK-Regular.ttf`.
-    Synthetic Chinese seeds must use only glyphs in `contract-glyphs.txt`. The
-    generator checks this and fails loudly on a missing glyph.
+  - Chinese uses ReportLab's built-in CID font `STSong-Light`, which is not embedded
+    and covers GB characters. The bundled test subset font has only 90 CJK glyphs,
+    which is too few for the mutation operators. A probe confirmed the PDF adapter
+    extracts `STSong-Light` text with clauses, dates, durations, money and
+    percentages intact.
 
 ### Authorized edit selection (`targets.py`)
 
@@ -266,8 +268,8 @@ can import `evaluation`. `mypy` and `ruff` cover `evaluation/` in CI too.
 
 - CUAD fetch failure or checksum mismatch: exit nonzero with a clear message, and
   leave no partially extracted data.
-- A missing glyph in a synthetic Chinese seed: generation error. Never silently
-  render a box.
+- A character the Chinese CID font cannot encode: ReportLab raises, and the case
+  becomes a recorded error. It is never silently dropped.
 - A per-case exception or timeout: recorded in the row's `error`, and the run
   continues. The summary makes errors prominent, and the CI gate fails on any error.
 
