@@ -112,7 +112,7 @@ def render(paragraphs: Sequence[str], path: Path, *, fmt: Format, language: Lang
 
 def _usable_width() -> float:
     width, _ = A4
-    return width - 2 * _MARGIN
+    return float(width) - 2 * _MARGIN
 
 
 def _wrap_words(text: str, font: str) -> list[str]:
