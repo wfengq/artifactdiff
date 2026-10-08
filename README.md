@@ -170,6 +170,18 @@ authorization still use the clause tree. Hidden DOCX text is excluded.
 `truncated_headings` reports when response limits shorten the heading output.
 Multi-column PDF limits above still apply.
 
+## Evaluation
+
+[`evaluation/`](evaluation/README.md) is a reproducible benchmark. It measures false
+passes (an unauthorized change judged `PASS`), false blocks (an authorized edit
+blocked) and draftability. It runs on a committed synthetic corpus, which CI gates at
+zero false passes, and on the CUAD v1 contract dataset. Both DOCX and text-layer PDF
+are covered.
+
+```console
+python -m evaluation run --source synthetic --output build/eval/synthetic
+```
+
 ## Development
 
 ```console
