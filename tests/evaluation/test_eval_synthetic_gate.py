@@ -4,7 +4,7 @@ import os
 import time
 from pathlib import Path
 
-from evaluation.models import Format
+from evaluation.models import Expectation, Format
 from evaluation.mutations import OPERATORS
 from evaluation.runner import run_cases
 from evaluation.sources import load_synthetic
@@ -27,6 +27,7 @@ def test_synthetic_gate(tmp_path: Path) -> None:
     assert [r.key for r in run.results if r.false_pass] == []
     authorized = [r for r in run.results if r.key.operator == "authorized"]
     assert len(authorized) == 8
-    assert [r.key for r in authorized if not r.accepted] == []
+    must_accept = [r for r in run.results if r.expectation is Expectation.ACCEPT]
+    assert [r.key for r in must_accept if not r.accepted] == []
     assert {r.key.operator for r in run.results} == {spec.name for spec in OPERATORS}
     assert elapsed < 60

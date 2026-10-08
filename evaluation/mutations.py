@@ -53,6 +53,8 @@ _ZH_DATE = re.compile(r"(?P<year>\d{4})年(?P<month>\d{1,2})月(?P<day>\d{1,2})�
 _EN_DATE = re.compile(rf"(?P<month_name>{'|'.join(_MONTHS)}) (?P<day>\d{{1,2}}), (?P<year>\d{{4}})")
 _EN_PARTY = re.compile(r"(?P<name>(?:[A-Z][\w&.-]*\s){1,4})(?P<suffix>Inc\.|LLC|Ltd\.|Corporation)")
 _ZH_PARTY = re.compile(r"(?:甲方|乙方)：(?P<name>[^；;。\n]+)")
+# A capitalized word such as a defined term ("Affiliate"); case carries legal meaning.
+_CAPITALIZED = re.compile(r"\b[A-Z][a-z]{3,}\b")
 
 
 @dataclass(frozen=True)
@@ -339,6 +341,47 @@ def _same_para_sentence_delete(
     return NotApplicable("edited paragraph has no other sentence")
 
 
+def _same_para_case_change(
+    paragraphs: Paragraphs, edit: AuthorizedEdit, language: Language, rng: random.Random
+) -> Result:
+    candidate = apply_authorized(paragraphs, edit)
+    text = candidate[edit.paragraph_index]
+    start = text.find(edit.after)
+    protected = (start, start + len(edit.after))
+    for match in _CAPITALIZED.finditer(text):
+        if match.start() < protected[1] and protected[0] < match.end():
+            continue
+        changed = text[: match.start()] + match.group().lower() + text[match.end() :]
+        return _replace_paragraph(candidate, edit.paragraph_index, changed)
+    return NotApplicable("no capitalized word in edited paragraph")
+
+
+def _case_change(
+    paragraphs: Paragraphs, edit: AuthorizedEdit, language: Language, rng: random.Random
+) -> Result:
+    candidate = apply_authorized(paragraphs, edit)
+    site = _elsewhere(
+        candidate, edit, rng, lambda t: _CAPITALIZED.search(t) is not None, "no capitalized word"
+    )
+    if isinstance(site, NotApplicable):
+        return site
+    text = candidate[site]
+    match = _CAPITALIZED.search(text)
+    assert match is not None
+    changed = text[: match.start()] + match.group().lower() + text[match.end() :]
+    return _replace_paragraph(candidate, site, changed)
+
+
+def _whitespace_noise(
+    paragraphs: Paragraphs, edit: AuthorizedEdit, language: Language, rng: random.Random
+) -> Result:
+    candidate = apply_authorized(paragraphs, edit)
+    site = _elsewhere(candidate, edit, rng, lambda t: " " in t, "no space to widen")
+    if isinstance(site, NotApplicable):
+        return site
+    return _replace_paragraph(candidate, site, candidate[site].replace(" ", "  ", 1))
+
+
 def _sentence_insert(
     paragraphs: Paragraphs, edit: AuthorizedEdit, language: Language, rng: random.Random
 ) -> Result:
@@ -388,6 +431,7 @@ OPERATORS: tuple[OperatorSpec, ...] = (
     OperatorSpec(
         "same_para_sentence_delete", "same paragraph", _BLOCK, _same_para_sentence_delete
     ),
+    OperatorSpec("same_para_case_change", "same paragraph", _BLOCK, _same_para_case_change),
     OperatorSpec(
         "money_change",
         "elsewhere",
@@ -433,4 +477,7 @@ OPERATORS: tuple[OperatorSpec, ...] = (
     OperatorSpec("sentence_insert", "elsewhere", _BLOCK, _sentence_insert),
     OperatorSpec("sentence_delete", "elsewhere", _BLOCK, _sentence_delete),
     OperatorSpec("paragraph_delete", "elsewhere", _BLOCK, _paragraph_delete),
+    OperatorSpec("case_change", "elsewhere", _BLOCK, _case_change),
+    # Whitespace-only noise must not block: PDF reflow and editors change spacing freely.
+    OperatorSpec("whitespace_noise", "robustness", Expectation.ACCEPT, _whitespace_noise),
 )

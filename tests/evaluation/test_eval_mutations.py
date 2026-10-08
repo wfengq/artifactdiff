@@ -48,6 +48,7 @@ def test_operator_table_matches_spec() -> None:
         "same_para_number",
         "same_para_negation",
         "same_para_sentence_delete",
+        "same_para_case_change",
         "money_change",
         "date_change",
         "duration_change",
@@ -59,9 +60,20 @@ def test_operator_table_matches_spec() -> None:
         "sentence_insert",
         "sentence_delete",
         "paragraph_delete",
+        "case_change",
+        "whitespace_noise",
     ]
-    assert [s.name for s in OPERATORS if s.expectation is Expectation.ACCEPT] == ["authorized"]
-    assert {s.group for s in OPERATORS} == {"baseline", "application", "same paragraph", "elsewhere"}
+    assert [s.name for s in OPERATORS if s.expectation is Expectation.ACCEPT] == [
+        "authorized",
+        "whitespace_noise",
+    ]
+    assert {s.group for s in OPERATORS} == {
+        "baseline",
+        "application",
+        "same paragraph",
+        "elsewhere",
+        "robustness",
+    }
 
 
 def test_apply_authorized_changes_only_the_edited_paragraph() -> None:
@@ -86,6 +98,7 @@ def test_apply_authorized_changes_only_the_edited_paragraph() -> None:
         ("negation_insert", replaced(EN_AUTH, 3, "shall keep", "shall not keep")),
         ("negation_remove", replaced(EN_AUTH, 2, "shall not disclose", "shall disclose")),
         ("modal_swap", replaced(EN_AUTH, 0, "may audit", "shall audit")),
+        ("same_para_case_change", replaced(EN_AUTH, 1, "The Customer shall", "The customer shall")),
     ],
 )
 def test_english_operators_make_exact_changes(name: str, expected: tuple[str, ...]) -> None:
@@ -167,4 +180,26 @@ def test_operators_return_not_applicable_without_a_site() -> None:
     edit = AuthorizedEdit("30 days", "45 days", 1, "", "", "within")
     for name in ("money_change", "date_change", "party_change", "negation_remove", "same_para_number"):
         result = op(name).fn(paragraphs, edit, "en", random.Random(0))
+        assert isinstance(result, NotApplicable), name
+
+
+def test_case_change_lowercases_one_capitalized_word_elsewhere() -> None:
+    result = run("case_change", "en")
+    changed = [i for i, (a, b) in enumerate(zip(EN_AUTH, result, strict=True)) if a != b]
+    assert len(changed) == 1 and changed[0] != 1
+    before, after = EN_AUTH[changed[0]], result[changed[0]]
+    assert before != after and before.lower() == after.lower()
+    assert sum(x != y for x, y in zip(before, after, strict=True)) == 1
+
+
+def test_whitespace_noise_doubles_one_space_elsewhere() -> None:
+    result = run("whitespace_noise", "en")
+    changed = [i for i, (a, b) in enumerate(zip(EN_AUTH, result, strict=True)) if a != b]
+    assert len(changed) == 1 and changed[0] != 1
+    assert result[changed[0]] == EN_AUTH[changed[0]].replace(" ", "  ", 1)
+
+
+def test_case_operators_do_not_apply_to_chinese() -> None:
+    for name in ("case_change", "same_para_case_change"):
+        result = op(name).fn(ZH, ZH_EDIT, "zh", random.Random(0))
         assert isinstance(result, NotApplicable), name
