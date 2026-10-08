@@ -61,3 +61,23 @@ def test_cli_exits_nonzero_when_cases_errored(
     )
     assert main(["run", "--source", "synthetic", "--output", str(tmp_path / "o")]) == 1
     assert "errors: 1" in capsys.readouterr().out
+
+
+def test_cli_records_the_commit_from_before_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import evaluation.__main__ as cli
+    from evaluation.runner import RunResult
+
+    head = {"commit": "commit-at-start"}
+    monkeypatch.setattr(cli, "current_git_commit", lambda: head["commit"])
+
+    def fake_run(*args: object, **kwargs: object) -> RunResult:
+        head["commit"] = "commit-at-end"  # someone commits while the benchmark runs
+        return RunResult([], [], [], 0)
+
+    monkeypatch.setattr(cli, "run_cases", fake_run)
+    output = tmp_path / "o"
+    assert main(["run", "--source", "synthetic", "--output", str(output)]) == 0
+    summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
+    assert summary["metadata"]["git_commit"] == "commit-at-start"
