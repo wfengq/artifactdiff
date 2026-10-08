@@ -18,7 +18,7 @@ from artifactdiff.contract.models import (
     ProtectedEntity,
     ProtectedRegion,
 )
-from artifactdiff.normalize import normalize_text
+from artifactdiff.normalize import comparison_text, normalize_text
 from artifactdiff.verification.models import (
     ClauseChange,
     ClauseChangeKind,
@@ -329,7 +329,9 @@ def _diff_clauses(
     for before_index, after_index in pairs:
         before = baseline.clauses[before_index]
         after = candidate.clauses[after_index]
-        modified = before.fingerprint != after.fingerprint or _entities_differ(before, after)
+        modified = comparison_text(before.text) != comparison_text(after.text) or (
+            _entities_differ(before, after)
+        )
         moved = (
             tuple(normalize_text(item) for item in before.ancestor_path)
             != tuple(normalize_text(item) for item in after.ancestor_path)

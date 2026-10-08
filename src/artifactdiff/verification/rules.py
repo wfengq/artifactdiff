@@ -24,7 +24,7 @@ from artifactdiff.contract import (
 from artifactdiff.contract.models import DocumentFeature, EvidenceRef
 from artifactdiff.errors import PolicyValidationError
 from artifactdiff.models import Rect, VisualPageChange
-from artifactdiff.normalize import normalize_text
+from artifactdiff.normalize import comparison_text, normalize_text
 from artifactdiff.policy import FrozenPolicy, ProtectedTarget, validate_frozen_policy
 from artifactdiff.verification.alignment import (
     AlignmentBudget,
@@ -456,7 +456,7 @@ def _expected_phase(
         )
         applied = counted and corresponds
         reconstructed = before_text.replace(before_value, after_value, operation.occurrences)
-        exact = applied and normalize_text(reconstructed) == normalize_text(after_text)
+        exact = applied and comparison_text(reconstructed) == comparison_text(after_text)
         rule_location = f"{location}:{_clause_location(before_clause, after_clause)}"
         if not applied:
             findings.append(
@@ -558,7 +558,7 @@ def _collective_exactness(
             pieces.extend((baseline_text[cursor : span.start], after_value))
             cursor = span.end
         pieces.append(baseline_text[cursor:])
-        exact_pairs[pair] = normalize_text("".join(pieces)) == normalize_text(
+        exact_pairs[pair] = comparison_text("".join(pieces)) == comparison_text(
             items[0].after_clause.text
         )
     return [

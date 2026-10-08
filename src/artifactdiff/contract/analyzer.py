@@ -21,7 +21,7 @@ from artifactdiff.contract.models import (
 )
 from artifactdiff.contract.numbering import ClauseMarker, parse_clause_marker
 from artifactdiff.models import ContentBlock, ContentType, DocumentSnapshot, Rect, SourceDescriptor
-from artifactdiff.normalize import fingerprint, normalize_text
+from artifactdiff.normalize import comparison_fingerprint, fingerprint, normalize_text
 
 SIGNATURE_TERMS = frozenset({"\u7b7e\u5b57", "\u7b7e\u540d", "\u6388\u6743\u4ee3\u8868", "signature", "signed by"})
 SEAL_TERMS = frozenset({"\u76d6\u7ae0", "\u516c\u7ae0", "\u5370\u7ae0", "seal", "company chop"})
@@ -143,7 +143,7 @@ def _image_matches_block(feature: DocumentFeature, block: ContentBlock) -> bool:
 def _protected_region(
     block: ContentBlock, kind: ProtectedRegionKind, features: list[DocumentFeature]
 ) -> ProtectedRegion:
-    text_fingerprint = fingerprint(block.text)
+    text_fingerprint = comparison_fingerprint(block.text)
     material = f"{kind.value}\0{text_fingerprint}\0{block.id}".encode()
     matched_features = [feature for feature in features if _image_matches_block(feature, block)]
     evidence = [_evidence(block)]

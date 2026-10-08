@@ -607,6 +607,50 @@ def test_pure_edit_with_ambiguous_replacement_position_still_fails() -> None:
     assert expected.approvable is False
 
 
+_PAY_BEFORE = "Payment obligations\nThe Customer shall pay within 30 days."
+_OTHER_BEFORE = "The Licensor shall indemnify each Affiliate of the Customer."
+
+
+def _two_clause_verdict(pay_after: str, other_after: str) -> RawVerdict:
+    baseline = _contract(
+        _clause("before-payment", _PAY_BEFORE),
+        _clause("before-indemnity", _OTHER_BEFORE, label="article iii", heading="Indemnity"),
+        sha="a",
+    )
+    candidate = _contract(
+        _clause("after-payment", pay_after),
+        _clause("after-indemnity", other_after, label="article iii", heading="Indemnity"),
+        sha="b",
+    )
+    return _evaluate(baseline, candidate, _frozen(baseline, before="30 days", after="45 days"))
+
+
+@pytest.mark.parametrize(
+    "other_after",
+    [
+        "The Licensor shall indemnify each affiliate of the Customer.",
+        "The licensor shall indemnify each Affiliate of the Customer.",
+        "The Licensor shall indemnify each Ａffiliate of the Customer.",
+    ],
+)
+def test_case_or_compatibility_change_in_another_clause_fails(other_after: str) -> None:
+    verdict = _two_clause_verdict(_PAY_BEFORE.replace("30 days", "45 days"), other_after)
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert any(item.rule_id == "contract-safe.unexplained-clause" for item in verdict.findings)
+
+
+def test_case_change_inside_the_authorized_clause_fails() -> None:
+    pay_after = "Payment obligations\nThe CUSTOMER shall pay within 45 days."
+    verdict = _two_clause_verdict(pay_after, _OTHER_BEFORE)
+    assert verdict.outcome is FindingOutcome.FAIL
+
+
+def test_whitespace_only_change_elsewhere_still_passes() -> None:
+    other_after = "The Licensor  shall indemnify each\nAffiliate of the Customer."
+    verdict = _two_clause_verdict(_PAY_BEFORE.replace("30 days", "45 days"), other_after)
+    assert verdict.outcome is FindingOutcome.PASS
+
+
 def test_extra_edit_without_explicit_allow_fails() -> None:
     baseline = _contract(
         _clause(
