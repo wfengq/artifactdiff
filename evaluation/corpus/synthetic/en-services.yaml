@@ -1,0 +1,23 @@
+id: en-services
+language: en
+license: CC0-1.0
+paragraphs:
+  - MASTER SERVICES AGREEMENT
+  - Article I Parties
+  - This agreement is made on 2026-08-04 between Acme Analytics Inc. (the Customer) and Northwind Services Ltd. (the Provider).
+  - Article II Payment Terms
+  - The Customer shall pay each undisputed invoice within 30 days of receipt. Each invoice may list up to 12 line items.
+  - Article III Fees
+  - The monthly fee is USD 12,500.00. Late payments accrue interest at 1.5% per month.
+  - Article IV Term and Termination
+  - This agreement continues for 24 months. Either party may terminate it on 60 days written notice.
+  - Article V Confidentiality
+  - The Provider shall not disclose Confidential Information. The Provider shall return all materials on request.
+  - Article VI General Terms
+  - This agreement is governed by the laws of the State of New York.
+edit:
+  before: 30 days
+  after: 45 days
+  clause_label: article ii
+  heading: Payment Terms
+  anchor: each undisputed invoice within
