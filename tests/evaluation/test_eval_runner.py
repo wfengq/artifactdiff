@@ -23,6 +23,12 @@ def _sleepy(job: CaseJob) -> CaseResult:
     )
 
 
+def _hang_two(job: CaseJob) -> CaseResult:
+    if job.key.operator in {"money_change", "date_change"}:
+        time.sleep(600)
+    return _sleepy(job)
+
+
 def _without_durations(run: RunResult) -> list[dict[str, object]]:
     rows = [result.to_json() for result in run.results]
     for row in rows:
@@ -81,3 +87,18 @@ def test_runner_records_draft_failures_without_cases(tmp_path: Path) -> None:
     run = run_cases([contract], [Format.DOCX], seed=0, workers=1, case_timeout=60, workdir=tmp_path)
     assert run.results == []
     assert [f.reason for f in run.draft_failures] == ["no-unique-target"]
+
+
+def test_hung_cases_do_not_starve_the_rest_of_the_run(tmp_path: Path) -> None:
+    run = run_cases(
+        load_synthetic()[:1],
+        [Format.DOCX],
+        seed=0,
+        workers=2,
+        case_timeout=3,
+        workdir=tmp_path,
+        case_fn=_hang_two,
+    )
+    errored = sorted(r.key.operator for r in run.results if r.error is not None)
+    assert errored == ["date_change", "money_change"]
+    assert len(run.results) == len(OPERATORS)

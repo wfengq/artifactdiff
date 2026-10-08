@@ -6,8 +6,8 @@ import multiprocessing
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from multiprocessing.pool import AsyncResult
 from pathlib import Path
+from typing import TypeVar
 
 from artifactdiff.application import ArtifactDiffApplication
 from artifactdiff.trust import TrustStore
@@ -92,38 +92,33 @@ def run_cases(
     workdir: Path,
     case_fn: Callable[[CaseJob], CaseResult] | None = None,
 ) -> RunResult:
-    function = case_fn or execute_case
-    pool = _new_pool(workers)
-    try:
-        prepared, draft_failures = _prepare_all(pool, contracts, formats, case_timeout, workdir)
-        jobs: list[CaseJob] = []
-        not_applicable: list[tuple[CaseKey, str]] = []
-        for item in prepared:
-            contract = item.contract
-            for spec in OPERATORS:
-                key = CaseKey(contract.source, contract.contract_id, item.format.value, spec.name)
-                candidate = spec.fn(
-                    contract.paragraphs,
-                    item.edit,
-                    contract.language,
-                    operator_rng(seed, contract.contract_id, spec.name),
-                )
-                if isinstance(candidate, NotApplicable):
-                    not_applicable.append((key, candidate.reason))
-                    continue
-                case_dir = item.baseline_path.parent.name
-                case_workdir = workdir / "cases" / case_dir / spec.name
-                jobs.append(CaseJob(key, spec.expectation, item, candidate, case_workdir))
-        pending = [(job, pool.apply_async(function, (job,))) for job in jobs]
-        results = [_collect(job, handle, case_timeout) for job, handle in pending]
-    finally:
-        pool.terminate()
-        pool.join()
+    prepared, draft_failures = _prepare_all(contracts, formats, workers, case_timeout, workdir)
+    jobs: list[CaseJob] = []
+    not_applicable: list[tuple[CaseKey, str]] = []
+    for item in prepared:
+        contract = item.contract
+        for spec in OPERATORS:
+            key = CaseKey(contract.source, contract.contract_id, item.format.value, spec.name)
+            candidate = spec.fn(
+                contract.paragraphs,
+                item.edit,
+                contract.language,
+                operator_rng(seed, contract.contract_id, spec.name),
+            )
+            if isinstance(candidate, NotApplicable):
+                not_applicable.append((key, candidate.reason))
+                continue
+            case_dir = item.baseline_path.parent.name
+            case_workdir = workdir / "cases" / case_dir / spec.name
+            jobs.append(CaseJob(key, spec.expectation, item, candidate, case_workdir))
+    outcomes = _map_isolated(case_fn or execute_case, jobs, workers=workers, timeout=case_timeout)
+    results = [
+        outcome if isinstance(outcome, CaseResult) else _error_result(job, outcome, case_timeout)
+        for job, outcome in zip(jobs, outcomes, strict=True)
+    ]
     return RunResult(
         results=sorted(results, key=lambda result: result.key),
-        draft_failures=sorted(
-            draft_failures, key=lambda f: (f.source, f.contract_id, f.format)
-        ),
+        draft_failures=sorted(draft_failures, key=lambda f: (f.source, f.contract_id, f.format)),
         not_applicable=sorted(not_applicable),
         pdf_replacements=sum(p.pdf_replacements for p in prepared if p.format is Format.PDF),
     )
@@ -134,55 +129,105 @@ def run_cases(
 START_METHOD = "spawn"
 
 
+class _Timeout:
+    """Marker for an item whose worker did not answer in time."""
+
+
+_Outcome = TypeVar("_Outcome")
+_Item = TypeVar("_Item")
+
+
 def _new_pool(workers: int) -> multiprocessing.pool.Pool:
     return multiprocessing.get_context(START_METHOD).Pool(max(1, workers))
 
 
+def _map_isolated(
+    function: Callable[[_Item], _Outcome],
+    items: Sequence[_Item],
+    *,
+    workers: int,
+    timeout: float,
+) -> list[_Outcome | BaseException | _Timeout]:
+    """Apply ``function`` in worker processes; a hung item never starves the others.
+
+    When an item times out, finished results are kept, the pool (and with it the hung
+    worker) is terminated, and every unfinished item is resubmitted to a fresh pool.
+    Each round settles at least the timed-out item, so the loop always terminates.
+    """
+    outcomes: dict[int, _Outcome | BaseException | _Timeout] = {}
+    remaining = list(range(len(items)))
+    while remaining:
+        pool = _new_pool(workers)
+        try:
+            handles = [(index, pool.apply_async(function, (items[index],))) for index in remaining]
+            remaining = []
+            for position, (index, handle) in enumerate(handles):
+                try:
+                    outcomes[index] = handle.get(timeout=timeout)
+                except multiprocessing.TimeoutError:
+                    outcomes[index] = _Timeout()
+                    for other, other_handle in handles[position + 1 :]:
+                        if other_handle.ready():
+                            try:
+                                outcomes[other] = other_handle.get(timeout=0)
+                            except Exception as error:  # noqa: BLE001 - recorded
+                                outcomes[other] = error
+                        else:
+                            remaining.append(other)
+                    break
+                except Exception as error:  # noqa: BLE001 - recorded, never a pass
+                    outcomes[index] = error
+        finally:
+            pool.terminate()
+            pool.join()
+    return [outcomes[index] for index in range(len(items))]
+
+
+def _failure_text(outcome: BaseException | _Timeout, timeout: float) -> str:
+    if isinstance(outcome, _Timeout):
+        return f"timeout after {timeout:g}s"
+    return f"{type(outcome).__name__}: {outcome}"[:300]
+
+
 def _prepare_all(
-    pool: multiprocessing.pool.Pool,
     contracts: Sequence[SourceContract],
     formats: Sequence[Format],
+    workers: int,
     timeout: float,
     workdir: Path,
 ) -> tuple[list[PreparedContract], list[DraftFailure]]:
-    handles = [
-        (
-            contract,
-            fmt,
-            pool.apply_async(
-                prepare, (contract, fmt, prepared_dir(workdir / "prepared", contract, fmt))
-            ),
-        )
+    tasks = [
+        (contract, fmt, prepared_dir(workdir / "prepared", contract, fmt))
         for contract in contracts
         for fmt in formats
     ]
+    outcomes = _map_isolated(_prepare_task, tasks, workers=workers, timeout=timeout)
     prepared: list[PreparedContract] = []
     failures: list[DraftFailure] = []
-    for contract, fmt, handle in handles:
-        try:
-            outcome = handle.get(timeout=timeout)
-        except multiprocessing.TimeoutError:
-            outcome = DraftFailure(
-                contract.source, contract.contract_id, fmt.value, f"timeout after {timeout:g}s"
-            )
-        except Exception as error:  # noqa: BLE001 - recorded, never silently dropped
-            outcome = DraftFailure(
-                contract.source, contract.contract_id, fmt.value, f"{type(error).__name__}: {error}"
-            )
+    for (contract, fmt, _), outcome in zip(tasks, outcomes, strict=True):
         if isinstance(outcome, PreparedContract):
             prepared.append(outcome)
-        else:
+        elif isinstance(outcome, DraftFailure):
             failures.append(outcome)
+        else:
+            failures.append(
+                DraftFailure(
+                    contract.source,
+                    contract.contract_id,
+                    fmt.value,
+                    _failure_text(outcome, timeout),
+                )
+            )
     return prepared, failures
 
 
-def _collect(job: CaseJob, handle: AsyncResult[CaseResult], timeout: float) -> CaseResult:
-    try:
-        return handle.get(timeout=timeout)
-    except multiprocessing.TimeoutError:
-        error = f"timeout after {timeout:g}s"
-    except Exception as failure:  # noqa: BLE001 - recorded, never counted as a pass
-        error = f"{type(failure).__name__}: {failure}"[:300]
+def _prepare_task(
+    task: tuple[SourceContract, Format, Path],
+) -> PreparedContract | DraftFailure:
+    return prepare(*task)
+
+
+def _error_result(job: CaseJob, outcome: BaseException | _Timeout, timeout: float) -> CaseResult:
     return CaseResult(
         key=job.key,
         expectation=job.expectation,
@@ -192,5 +237,5 @@ def _collect(job: CaseJob, handle: AsyncResult[CaseResult], timeout: float) -> C
         edited_clause_chars=job.prepared.edited_clause_chars,
         baseline_clause_count=job.prepared.baseline_clause_count,
         duration_s=timeout,
-        error=error,
+        error=_failure_text(outcome, timeout),
     )
