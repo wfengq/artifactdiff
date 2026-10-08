@@ -116,7 +116,7 @@ def _field(row: CaseResult, field: str) -> str:
 
 
 def _acceptance(rows: list[CaseResult]) -> dict[str, object]:
-    accept = [r for r in rows if r.expectation is Expectation.ACCEPT]
+    accept = [r for r in rows if r.key.operator == "authorized"]
     reasons: Counter[str] = Counter()
     for row in accept:
         if row.error is not None:
@@ -187,6 +187,19 @@ def build_summary(run: RunResult, metadata: RunMetadata) -> dict[str, object]:
         "false_pass": _false_pass(rows),
         "blocked_split": blocked_split,
         "acceptance": _acceptance(rows),
+        "robustness": {
+            name: _rate(
+                sum(r.accepted for r in rows if r.key.operator == name),
+                sum(1 for r in rows if r.key.operator == name),
+            )
+            for name in sorted(
+                {
+                    r.key.operator
+                    for r in rows
+                    if r.expectation is Expectation.ACCEPT and r.key.operator != "authorized"
+                }
+            )
+        },
         "draftability": {
             "draftable": len(prepared),
             "total": total_prepared,
@@ -291,6 +304,13 @@ def render_markdown(summary: Mapping[str, Any], metadata: RunMetadata) -> str:
             for name, entry in by_operator.items()
         ],
     )
+    robustness = summary["robustness"]
+    if robustness:
+        lines += ["", "## Noise that must still be accepted", ""]
+        lines += _table(
+            ("Operator", "Accepted", "Rate (95% CI)"),
+            [(n, f"{e['count']}/{e['total']}", _pct(e)) for n, e in robustness.items()],
+        )
     lines += ["", "## False passes by format", ""]
     lines += _table(
         ("Format", "False passes", "Rate (95% CI)"),

@@ -74,6 +74,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         contracts = load_synthetic()[: arguments.limit]
 
+    # Record what is being measured before the run: HEAD may move while it executes.
+    git_commit = current_git_commit()
+    version = artifactdiff_version()
     with tempfile.TemporaryDirectory(prefix="artifactdiff-eval-") as workdir:
         run = run_cases(
             contracts,
@@ -86,8 +89,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     metadata = RunMetadata(
         source=arguments.source,
         cuad_sha256=CUAD_SHA256 if arguments.source == "cuad" else None,
-        artifactdiff_version=artifactdiff_version(),
-        git_commit=current_git_commit(),
+        artifactdiff_version=version,
+        git_commit=git_commit,
         seed=arguments.seed,
         limit=arguments.limit,
         formats=tuple(fmt.value for fmt in formats),

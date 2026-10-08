@@ -12,6 +12,21 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", normalized).strip().casefold()
 
 
+def comparison_text(text: str) -> str:
+    """Normalize only what never carries meaning: Unicode composition and whitespace.
+
+    Unlike ``normalize_text`` this keeps case and compatibility characters, so a
+    defined term ("Affiliate" -> "affiliate") or a full-width character is a change.
+    """
+    normalized = unicodedata.normalize("NFC", text).replace("\u00a0", " ")
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def comparison_fingerprint(text: str) -> str:
+    """Return the SHA-256 of ``comparison_text``: case-sensitive, whitespace-insensitive."""
+    return hashlib.sha256(comparison_text(text).encode("utf-8")).hexdigest()
+
+
 def fingerprint(text: str) -> str:
     """Return the SHA-256 fingerprint of normalized text."""
     return hashlib.sha256(normalize_text(text).encode("utf-8")).hexdigest()

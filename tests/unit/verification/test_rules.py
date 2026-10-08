@@ -593,6 +593,25 @@ def test_extra_edit_in_clause_beyond_alignment_budget_still_fails() -> None:
         assert expected.approvable is False
 
 
+def test_pure_multi_occurrence_edit_with_length_change_in_large_clause_passes() -> None:
+    text = (
+        f"Payment obligations\n{'A' * 1500} first notice by courier, "
+        f"{'B' * 1500} Payment obligations: second notice by courier."
+    )
+    baseline = _contract(_clause("before-payment", text), sha="a")
+    candidate = _contract(
+        _clause("after-payment", text.replace("courier", "registered mail")), sha="b"
+    )
+
+    verdict = _evaluate(
+        baseline,
+        candidate,
+        _frozen(baseline, before="courier", after="registered mail", occurrences=2),
+    )
+
+    assert verdict.outcome is FindingOutcome.PASS
+
+
 def test_pure_edit_with_ambiguous_replacement_position_still_fails() -> None:
     baseline = _contract(_clause("before-payment", "Payment obligations\nbabbbaa"), sha="a")
     candidate = _contract(_clause("after-payment", "Payment obligations\nbabbbbb"), sha="b")
@@ -605,6 +624,89 @@ def test_pure_edit_with_ambiguous_replacement_position_still_fails() -> None:
     assert verdict.outcome is FindingOutcome.FAIL
     assert expected.outcome is FindingOutcome.FAIL
     assert expected.approvable is False
+
+
+_PAY_BEFORE = "Payment obligations\nThe Customer shall pay within 30 days."
+_OTHER_BEFORE = "The Licensor shall indemnify each Affiliate of the Customer."
+
+
+def _two_clause_verdict(pay_after: str, other_after: str) -> RawVerdict:
+    baseline = _contract(
+        _clause("before-payment", _PAY_BEFORE),
+        _clause("before-indemnity", _OTHER_BEFORE, label="article iii", heading="Indemnity"),
+        sha="a",
+    )
+    candidate = _contract(
+        _clause("after-payment", pay_after),
+        _clause("after-indemnity", other_after, label="article iii", heading="Indemnity"),
+        sha="b",
+    )
+    return _evaluate(baseline, candidate, _frozen(baseline, before="30 days", after="45 days"))
+
+
+@pytest.mark.parametrize(
+    "other_after",
+    [
+        "The Licensor shall indemnify each affiliate of the Customer.",
+        "The licensor shall indemnify each Affiliate of the Customer.",
+        "The Licensor shall indemnify each Ａffiliate of the Customer.",
+    ],
+)
+def test_case_or_compatibility_change_in_another_clause_fails(other_after: str) -> None:
+    verdict = _two_clause_verdict(_PAY_BEFORE.replace("30 days", "45 days"), other_after)
+    assert verdict.outcome is FindingOutcome.FAIL
+    assert any(item.rule_id == "contract-safe.unexplained-clause" for item in verdict.findings)
+
+
+def test_case_change_inside_the_authorized_clause_fails() -> None:
+    pay_after = "Payment obligations\nThe CUSTOMER shall pay within 45 days."
+    verdict = _two_clause_verdict(pay_after, _OTHER_BEFORE)
+    assert verdict.outcome is FindingOutcome.FAIL
+
+
+def test_whitespace_only_change_elsewhere_still_passes() -> None:
+    other_after = "The Licensor  shall indemnify each\nAffiliate of the Customer."
+    verdict = _two_clause_verdict(_PAY_BEFORE.replace("30 days", "45 days"), other_after)
+    assert verdict.outcome is FindingOutcome.PASS
+
+
+_HEADING_B = "Payment obligations: the Customer shall pay within 30 days"
+
+
+def _heading_clause(clause_id: str, heading: str, label: str = "3.3") -> ContractClause:
+    # Decimal clauses without a separate heading use their first sentence as heading.
+    return _clause(
+        clause_id, f"{label} {heading}. Late amounts accrue interest.", label=label, heading=heading
+    )
+
+
+def test_edit_inside_a_sentence_used_as_heading_pairs_as_modified() -> None:
+    baseline = _contract(_heading_clause("before-payment", _HEADING_B), sha="a")
+    candidate = _contract(
+        _heading_clause("after-payment", _HEADING_B.replace("30 days", "45 days")), sha="b"
+    )
+
+    verdict = _evaluate(baseline, candidate, _frozen(baseline, before="30 days", after="45 days"))
+
+    assert verdict.outcome is FindingOutcome.PASS
+
+
+def test_label_pairing_requires_a_unique_label() -> None:
+    other = "Other obligations: the Supplier shall deliver promptly"
+    baseline = _contract(
+        _heading_clause("before-payment", _HEADING_B),
+        _heading_clause("before-other", other),
+        sha="a",
+    )
+    candidate = _contract(
+        _heading_clause("after-payment", _HEADING_B.replace("30 days", "45 days")),
+        _heading_clause("after-other", other.replace("promptly", "late")),
+        sha="b",
+    )
+
+    verdict = _evaluate(baseline, candidate, _frozen(baseline, before="30 days", after="45 days"))
+
+    assert verdict.outcome is FindingOutcome.FAIL
 
 
 def test_extra_edit_without_explicit_allow_fails() -> None:

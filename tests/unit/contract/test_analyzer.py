@@ -437,3 +437,24 @@ def test_analyzer_preserves_real_multipage_pdf_clause_and_entity_order(
         entity.kind is EntityKind.MONEY for entity in first.clauses[1].entities
     )
     assert second.model_dump(mode="json") == first.model_dump(mode="json")
+
+
+def _header_fingerprint(text: str) -> str:
+    block = ContentBlock(
+        id="header",
+        ordinal=0,
+        content_type=ContentType.HEADER,
+        text=text,
+        normalized_text=normalize_text(text),
+    )
+    snapshot = DocumentSnapshot(
+        source_path="contract.pdf", format="pdf", sha256="c" * 64, size_bytes=1, blocks=[block]
+    )
+    (region,) = analyze_contract(snapshot).protected_regions
+    return region.text_fingerprint
+
+
+def test_protected_region_fingerprint_keeps_case_but_ignores_whitespace() -> None:
+    original = _header_fingerprint("Confidential - Acme Holdings Inc.")
+    assert _header_fingerprint("CONFIDENTIAL - Acme Holdings Inc.") != original
+    assert _header_fingerprint("Confidential -  Acme\nHoldings Inc.") == original

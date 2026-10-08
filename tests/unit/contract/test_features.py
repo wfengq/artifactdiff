@@ -20,7 +20,7 @@ from artifactdiff.contract.features import (
     ooxml_on_off_enabled,
 )
 from artifactdiff.formats.docx import DocxAdapter
-from artifactdiff.normalize import fingerprint
+from artifactdiff.normalize import comparison_fingerprint, fingerprint
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -341,8 +341,8 @@ def test_docx_on_off_visibility_keeps_false_values_and_bounds_true_hidden_text(
     margin_fingerprints = {
         item.kind.value: item.text_fingerprint for item in contract.protected_regions
     }
-    assert margin_fingerprints["header"] == fingerprint("Header Term A")
-    assert margin_fingerprints["footer"] == fingerprint("Footer Term A")
+    assert margin_fingerprints["header"] == comparison_fingerprint("Header Term A")
+    assert margin_fingerprints["footer"] == comparison_fingerprint("Footer Term A")
 
 
 @pytest.mark.parametrize(

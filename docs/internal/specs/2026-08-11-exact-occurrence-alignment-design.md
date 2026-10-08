@@ -112,3 +112,42 @@ Before Plan 2 may be marked complete:
 - No fuzzy semantic equivalence for expected replacements.
 - No Plan 3 work.
 - No unrelated refactor of the verification rules module.
+
+## 9. Addendum (2026-10-08): pure-replacement shortcut
+
+`is_unambiguous_pure_replacement` (in `verification/alignment.py`) decides the proof without the
+DP. Both conditions below are required:
+
+1. The candidate clause equals the baseline clause with every anchored `before` span replaced by
+   `after`. The comparison is on NFC text and is character-exact (case and whitespace included).
+2. Anchor `i`'s candidate span starts exactly at `before_spans[i].start + i·delta`, where
+   `delta = len(after) − len(before)`.
+
+**Why it is sound.** The path that takes every anchor costs 0. A zero-cost path consists only of
+matching diagonal steps, which keep the offset `after_index − before_index` fixed, and anchors,
+which add `delta`.
+
+- If `delta ≠ 0`: reaching anchor `i` requires exactly the `i` earlier anchors, and reaching the end
+  requires offset `k·delta`. So every zero-cost path takes every anchor.
+- If `delta = 0`: skipping an anchor compares `before` with `after` at the same position. They
+  differ, because `after_text.count(before) == 0`, so skipping costs at least 1.
+
+Every minimum-cost alignment therefore uses every anchor, which is exactly the DP's acceptance
+condition. The only behavioral change is that the verdict-wide budget is no longer exhausted by
+pure replacements in large clauses.
+
+**Evidence.**
+
+- A seeded property test re-proves every shortcut hit with the DP.
+- An independent review searched about 162k small cases exhaustively and 600k fuzzed cases, and
+  ran 2,834 end-to-end verdicts with the shortcut on and off. It found no counterexample.
+
+**Do not loosen condition 2.** Without it, a position-ambiguous replacement such as `baa → bbb`
+inside `babbbaa` would pass. The DP rejects that case.
+
+**Known limits, unchanged by the shortcut.**
+
+- A large clause that also carries another edit takes the DP and fails closed on the budget. This
+  includes an `allow`ed edit and a second expected rule.
+- Protected-entity checks are value-based. A declared edit of a value that occurs more than once
+  in the clause still fails, for example `ninety (90) days` next to `90 days`.

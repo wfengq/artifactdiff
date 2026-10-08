@@ -172,3 +172,19 @@ def test_conditional_false_pass_counts_only_pairs_whose_authorized_edit_passed()
     conditional = summary["false_pass"]["given_authorized_accepted"]
     assert (conditional["count"], conditional["total"]) == (1, 2)
     assert "where the authorized edit passed: 1/2 (50.00%" in headline(summary)
+
+
+def test_acceptance_counts_only_authorized_and_robustness_is_separate() -> None:
+    run = RunResult(
+        results=[
+            _row("authorized", "pass", expectation=Expectation.ACCEPT),
+            _row("whitespace_noise", "fail", expectation=Expectation.ACCEPT, rules=("x",)),
+        ],
+        draft_failures=[],
+        not_applicable=[],
+        pdf_replacements=0,
+    )
+    summary = build_summary(run, _metadata())
+    assert (summary["acceptance"]["accepted"], summary["acceptance"]["total"]) == (1, 1)
+    robustness = summary["robustness"]["whitespace_noise"]
+    assert (robustness["count"], robustness["total"]) == (0, 1)
